@@ -1,5 +1,5 @@
 /*
- * REAPER PLUGIN WITH DEBUG OUTPUT
+ * REAPER PLUGIN WITH PROPER TRACK IDENTIFICATION
  */
 
 #include "WDL/wdltypes.h"
@@ -9,6 +9,7 @@
 #include <atomic>
 #include <mutex>
 #include <set>
+#include <map>
 
 extern "C" {
 #include "reaper_plugin.h"
@@ -32,7 +33,9 @@ void (*ShowConsoleMsg)(const char*) = nullptr;
 double (*GetMediaTrackInfo_Value)(MediaTrack* track, const char* parmname) = nullptr;
 int (*GetNumTracks)() = nullptr;
 MediaTrack* (*GetTrack)(int index) = nullptr;
-int (*CSurf_TrackFromID)(int id, bool mcpView) = nullptr;
+MediaTrack* (*GetMasterTrack)(int proj) = nullptr;
+GUID* (*GetTrackGUID)(MediaTrack* track) = nullptr;
+const char* (*GetTrackName)(MediaTrack* track, char* buf, int buf_sz) = nullptr;
 
 class CSurf_IPC : public IReaperControlSurface {
 private:
@@ -41,22 +44,43 @@ private:
     int m_server_socket{-1};
     std::mutex m_clients_mutex;
     std::set<int> m_client_sockets;
+    std::map<MediaTrack*, int> m_track_cache;
+
+    int findTrackIndex(MediaTrack* track) {
+        // Check cache first
+        auto it = m_track_cache.find(track);
+        if (it != m_track_cache.end()) {
+            return it->second;
+        }
+
+        // Check if it's the master track
+        if (GetMasterTrack && track == GetMasterTrack(0)) {
+            m_track_cache[track] = 0; // Master is track 0
+            return 0;
+        }
+
+        // Scan all tracks to find this one
+        if (GetNumTracks && GetTrack) {
+            int num_tracks = GetNumTracks();
+            for (int i = 0; i < num_tracks; i++) {
+                MediaTrack* current_track = GetTrack(i);
+                if (current_track == track) {
+                    m_track_cache[track] = i + 1; // Regular tracks start from 1
+                    return i + 1;
+                }
+            }
+        }
+
+        // If we can't find it, assign a temporary negative ID
+        int temp_id = -(int)m_track_cache.size() - 1;
+        m_track_cache[track] = temp_id;
+        return temp_id;
+    }
 
     void sendToAllClients(const std::string& message) {
         std::lock_guard<std::mutex> lock(m_clients_mutex);
-        if (ShowConsoleMsg) {
-            char debug[256];
-            snprintf(debug, sizeof(debug), "Sending to %zu clients: %s", m_client_sockets.size(), message.c_str());
-            ShowConsoleMsg(debug);
-        }
-
         for (int client_socket : m_client_sockets) {
-            int result = send(client_socket, message.c_str(), message.length(), 0);
-            if (result <= 0) {
-                if (ShowConsoleMsg) {
-                    ShowConsoleMsg("Failed to send to client\n");
-                }
-            }
+            send(client_socket, message.c_str(), message.length(), 0);
         }
     }
 
@@ -65,7 +89,22 @@ private:
             ShowConsoleMsg("New client connected\n");
         }
 
-        // Send initial state of all tracks
+        // Clear cache and rebuild
+        m_track_cache.clear();
+
+        // Send master track first (track 0)
+        if (GetMasterTrack && GetMediaTrackInfo_Value) {
+            MediaTrack* master_track = GetMasterTrack(0);
+            if (master_track) {
+                double volume = GetMediaTrackInfo_Value(master_track, "D_VOL");
+                char msg[256];
+                snprintf(msg, sizeof(msg), "VOL 0 %.3f\n", volume);
+                send(client_socket, msg, strlen(msg), 0);
+                m_track_cache[master_track] = 0;
+            }
+        }
+
+        // Send all regular tracks
         if (GetNumTracks && GetTrack && GetMediaTrackInfo_Value) {
             int num_tracks = GetNumTracks();
             for (int i = 0; i < num_tracks; i++) {
@@ -73,32 +112,20 @@ private:
                 if (track) {
                     double volume = GetMediaTrackInfo_Value(track, "D_VOL");
                     char msg[256];
-                    snprintf(msg, sizeof(msg), "VOL %d %.3f\n", i, volume);
+                    snprintf(msg, sizeof(msg), "VOL %d %.3f\n", i + 1, volume); // Tracks start from 1
                     send(client_socket, msg, strlen(msg), 0);
-
-                    if (ShowConsoleMsg) {
-                        char debug[256];
-                        snprintf(debug, sizeof(debug), "Sent initial volume for track %d: %.3f\n", i, volume);
-                        ShowConsoleMsg(debug);
-                    }
+                    m_track_cache[track] = i + 1;
                 }
             }
         }
 
-        // Keep connection open and wait for more data or keep alive
+        // Keep connection open
         char buffer[1024];
         while (m_running) {
             int bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
             if (bytes_read <= 0) {
-                if (ShowConsoleMsg) {
-                    ShowConsoleMsg("Client disconnected\n");
-                }
-                break; // Client disconnected or error
+                break;
             }
-
-            buffer[bytes_read] = '\0';
-// Echo back for testing, or process incoming commands
-
 #ifdef _WIN32
             Sleep(100);
 #else
@@ -106,7 +133,6 @@ private:
 #endif
         }
 
-        // Clean up client
         {
             std::lock_guard<std::mutex> lock(m_clients_mutex);
             m_client_sockets.erase(client_socket);
@@ -125,12 +151,8 @@ private:
 #endif
 
         m_server_socket = socket(AF_INET, SOCK_STREAM, 0);
-        if (m_server_socket < 0) {
-            if (ShowConsoleMsg) ShowConsoleMsg("Failed to create server socket\n");
-            return;
-        }
+        if (m_server_socket < 0) return;
 
-        // Set socket options
         int opt = 1;
         setsockopt(m_server_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
 
@@ -140,7 +162,6 @@ private:
         server_addr.sin_port = htons(PLUGIN_PORT);
 
         if (bind(m_server_socket, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-            if (ShowConsoleMsg) ShowConsoleMsg("Failed to bind server socket\n");
 #ifdef _WIN32
             closesocket(m_server_socket);
 #else
@@ -149,8 +170,7 @@ private:
             return;
         }
 
-        listen(m_server_socket, 5); // Allow multiple pending connections
-
+        listen(m_server_socket, 5);
         if (ShowConsoleMsg) ShowConsoleMsg("TCP Server started on port 9001\n");
 
         while (m_running) {
@@ -167,12 +187,9 @@ private:
                     std::lock_guard<std::mutex> lock(m_clients_mutex);
                     m_client_sockets.insert(client_socket);
                 }
-
-                // Handle client in this thread for simplicity
                 handleClient(client_socket);
             }
 
-// Small delay to prevent busy waiting
 #ifdef _WIN32
             Sleep(100);
 #else
@@ -180,7 +197,6 @@ private:
 #endif
         }
 
-        // Clean up all client connections
         {
             std::lock_guard<std::mutex> lock(m_clients_mutex);
             for (int client_socket : m_client_sockets) {
@@ -203,7 +219,6 @@ private:
 
 public:
     CSurf_IPC() {
-        if (ShowConsoleMsg) ShowConsoleMsg("CSurf_IPC constructor\n");
         m_running = true;
         m_server_thread = std::thread(&CSurf_IPC::runServer, this);
     }
@@ -218,40 +233,20 @@ public:
     virtual const char* GetTypeString() override { return "IPC_CSURF"; }
     virtual const char* GetDescString() override { return "IPC CSurf Test"; }
     virtual const char* GetConfigString() override { return ""; }
-    virtual void Run() override {
-        // This gets called regularly (about 30 times per second)
-    }
+    virtual void Run() override {}
 
     virtual void SetSurfaceVolume(MediaTrack* track, double volume) override {
-        // This gets called when a track volume changes in REAPER
+        int track_index = findTrackIndex(track);
+
         if (ShowConsoleMsg) {
             char msg[256];
-            snprintf(msg, sizeof(msg), "SetSurfaceVolume called: track=%p, volume=%.3f\n", track, volume);
+            snprintf(msg, sizeof(msg), "Volume: track_index=%d, volume=%.3f\n", track_index, volume);
             ShowConsoleMsg(msg);
         }
 
-        // Find the track index
-        if (GetNumTracks && GetTrack) {
-            int num_tracks = GetNumTracks();
-            for (int i = 0; i < num_tracks; i++) {
-                if (GetTrack(i) == track) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg), "VOL %d %.3f\n", i, volume);
-                    sendToAllClients(msg);
-
-                    if (ShowConsoleMsg) {
-                        char debug[256];
-                        snprintf(debug, sizeof(debug), "Sent volume update: track %d = %.3f\n", i, volume);
-                        ShowConsoleMsg(debug);
-                    }
-                    return;
-                }
-            }
-        }
-
-        if (ShowConsoleMsg) {
-            ShowConsoleMsg("Could not find track index for volume update\n");
-        }
+        char msg[256];
+        snprintf(msg, sizeof(msg), "VOL %d %.3f\n", track_index, volume);
+        sendToAllClients(msg);
     }
 
     virtual void SetSurfacePan(MediaTrack *track, double pan) override {}
@@ -290,13 +285,13 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
         GetMediaTrackInfo_Value = (double (*)(MediaTrack*, const char*))rec->GetFunc("GetMediaTrackInfo_Value");
         GetNumTracks = (int (*)())rec->GetFunc("GetNumTracks");
         GetTrack = (MediaTrack* (*)(int))rec->GetFunc("GetTrack");
-        CSurf_TrackFromID = (int (*)(int, bool))rec->GetFunc("CSurf_TrackFromID");
+        GetMasterTrack = (MediaTrack* (*)(int))rec->GetFunc("GetMasterTrack");
     }
 
     if (!ShowConsoleMsg) return 0;
 
     rec->Register("csurf", &csurf_reg);
-    ShowConsoleMsg("=== IPC Control Surface with Debug Output Loaded ===\n");
+    ShowConsoleMsg("=== IPC Control Surface with Fixed Track IDs ===\n");
     return 1;
 }
 }
