@@ -26,10 +26,19 @@
 #include <cstring>
 
 // --- OS-specific Networking ---
+#ifdef __APPLE__
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <netdb.h>
+#else
+// Linux headers (your existing code)
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#endif
 
 // --- OSC Library (oscpack example) ---
 // You must have oscpack headers and link the library.

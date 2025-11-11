@@ -1,21 +1,36 @@
-#
-# PLUGIN CMAKE (reaper_qt_project/plugin/CMakeLists.txt)
-#
+cmake_minimum_required(VERSION 3.16)
+project(reaper_csurf_ipc VERSION 1.0 LANGUAGES CXX)
 
 # Define the REAPER plugin directory
-set(REAPER_USER_PLUGINS_DIR "$ENV{HOME}/.config/REAPER/UserPlugins")
+if(APPLE)
+    set(REAPER_USER_PLUGINS_DIR "$ENV{HOME}/Library/Application Support/REAPER/UserPlugins")
+else()
+    set(REAPER_USER_PLUGINS_DIR "$ENV{HOME}/.config/REAPER/UserPlugins")
+endif()
+
 message(STATUS "REAPER UserPlugins directory set to: ${REAPER_USER_PLUGINS_DIR}")
 
-# Create the library (a .so file)
+# Create the library
 add_library(reaper_csurf_ipc SHARED
     reaper_plugin_stub.cpp
 )
 
 # Set the output name
-set_target_properties(reaper_csurf_ipc PROPERTIES
-    OUTPUT_NAME "reaper_csurf_ipc"
-    PREFIX "" # Removes the 'lib' prefix
-)
+if(APPLE)
+    set_target_properties(reaper_csurf_ipc PROPERTIES
+        OUTPUT_NAME "reaper_csurf_ipc"
+        SUFFIX ".dylib"
+        PREFIX ""
+    )
+else()
+    set_target_properties(reaper_csurf_ipc PROPERTIES
+        OUTPUT_NAME "reaper_csurf_ipc"
+        PREFIX ""
+    )
+endif()
+
+# Find Threads
+find_package(Threads REQUIRED)
 
 # Link necessary libraries
 target_link_libraries(reaper_csurf_ipc PRIVATE
@@ -25,19 +40,16 @@ target_link_libraries(reaper_csurf_ipc PRIVATE
 # Tell the compiler where to find the REAPER SDK headers
 target_include_directories(reaper_csurf_ipc PRIVATE
     ${REAPER_SDK_DIR}
-
-    # --- FINAL, STANDARD FIX ---
-    # The 'sdk' dir is at ${REAPER_SDK_DIR}
-    # We moved 'WDL' to be next to it, so we add
-    # the parent directory:
     ${REAPER_SDK_DIR}/../
-    # This allows the compiler to find "../WDL/swell/swell.h"
-    # --- END FINAL FIX ---
 )
 
-# --- Install Step ---
-# This creates a 'make install' command to copy the .so
-# file to the correct REAPER directory.
+# Set C++ standard
+set_target_properties(reaper_csurf_ipc PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+)
+
+# Install step
 install(TARGETS reaper_csurf_ipc
     LIBRARY DESTINATION ${REAPER_USER_PLUGINS_DIR}
     COMPONENT "Plugins"

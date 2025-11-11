@@ -1,8 +1,9 @@
 #
 # TOP-LEVEL CMAKE (reaper_qt_project/CMakeLists.txt)
 #
+
 cmake_minimum_required(VERSION 3.16)
-project(ReaperQtProject VERSION 1.0)
+project(mixer_v0 VERSION 1.0 LANGUAGES C CXX)
 
 # --- Find Qt6
 # This tells CMake to find the Qt6 package.
