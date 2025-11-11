@@ -1,5 +1,5 @@
 /*
- * REAPER PLUGIN WITH PROPER TRACK IDENTIFICATION
+ * REAPER PLUGIN WITH SIMPLIFIED TRACK HANDLING
  */
 
 #include "WDL/wdltypes.h"
@@ -34,8 +34,6 @@ double (*GetMediaTrackInfo_Value)(MediaTrack* track, const char* parmname) = nul
 int (*GetNumTracks)() = nullptr;
 MediaTrack* (*GetTrack)(int index) = nullptr;
 MediaTrack* (*GetMasterTrack)(int proj) = nullptr;
-GUID* (*GetTrackGUID)(MediaTrack* track) = nullptr;
-const char* (*GetTrackName)(MediaTrack* track, char* buf, int buf_sz) = nullptr;
 
 class CSurf_IPC : public IReaperControlSurface {
 private:
@@ -44,37 +42,34 @@ private:
     int m_server_socket{-1};
     std::mutex m_clients_mutex;
     std::set<int> m_client_sockets;
-    std::map<MediaTrack*, int> m_track_cache;
 
-    int findTrackIndex(MediaTrack* track) {
-        // Check cache first
-        auto it = m_track_cache.find(track);
-        if (it != m_track_cache.end()) {
-            return it->second;
-        }
+    // Simple track identification - we'll use a counter and map tracks as we see them
+    std::map<MediaTrack*, int> m_track_map;
+    int m_next_track_id{1}; // Start from 1, 0 is reserved for master
 
+    int getTrackId(MediaTrack* track) {
         // Check if it's the master track
         if (GetMasterTrack && track == GetMasterTrack(0)) {
-            m_track_cache[track] = 0; // Master is track 0
             return 0;
         }
 
-        // Scan all tracks to find this one
-        if (GetNumTracks && GetTrack) {
-            int num_tracks = GetNumTracks();
-            for (int i = 0; i < num_tracks; i++) {
-                MediaTrack* current_track = GetTrack(i);
-                if (current_track == track) {
-                    m_track_cache[track] = i + 1; // Regular tracks start from 1
-                    return i + 1;
-                }
-            }
+        // Check if we've seen this track before
+        auto it = m_track_map.find(track);
+        if (it != m_track_map.end()) {
+            return it->second;
         }
 
-        // If we can't find it, assign a temporary negative ID
-        int temp_id = -(int)m_track_cache.size() - 1;
-        m_track_cache[track] = temp_id;
-        return temp_id;
+        // New track - assign it an ID
+        int new_id = m_next_track_id++;
+        m_track_map[track] = new_id;
+
+        if (ShowConsoleMsg) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Assigned ID %d to new track %p\n", new_id, track);
+            ShowConsoleMsg(msg);
+        }
+
+        return new_id;
     }
 
     void sendToAllClients(const std::string& message) {
@@ -84,38 +79,47 @@ private:
         }
     }
 
-    void handleClient(int client_socket) {
-        if (ShowConsoleMsg) {
-            ShowConsoleMsg("New client connected\n");
+    void sendTrackVolume(MediaTrack* track, int client_socket = -1) {
+        if (!track || !GetMediaTrackInfo_Value) return;
+
+        double volume = GetMediaTrackInfo_Value(track, "D_VOL");
+        int track_id = getTrackId(track);
+
+        char msg[256];
+        snprintf(msg, sizeof(msg), "VOL %d %.3f\n", track_id, volume);
+
+        if (client_socket >= 0) {
+            // Send to specific client
+            send(client_socket, msg, strlen(msg), 0);
+        } else {
+            // Send to all clients
+            sendToAllClients(msg);
         }
 
-        // Clear cache and rebuild
-        m_track_cache.clear();
+        if (ShowConsoleMsg) {
+            char debug[256];
+            snprintf(debug, sizeof(debug), "Sent: %s", msg);
+            ShowConsoleMsg(debug);
+        }
+    }
 
-        // Send master track first (track 0)
-        if (GetMasterTrack && GetMediaTrackInfo_Value) {
+    void handleClient(int client_socket) {
+        if (ShowConsoleMsg) {
+            ShowConsoleMsg("New client connected - sending all track volumes\n");
+        }
+
+        // Send master track volume (ID 0)
+        if (GetMasterTrack) {
             MediaTrack* master_track = GetMasterTrack(0);
-            if (master_track) {
-                double volume = GetMediaTrackInfo_Value(master_track, "D_VOL");
-                char msg[256];
-                snprintf(msg, sizeof(msg), "VOL 0 %.3f\n", volume);
-                send(client_socket, msg, strlen(msg), 0);
-                m_track_cache[master_track] = 0;
-            }
+            sendTrackVolume(master_track, client_socket);
         }
 
         // Send all regular tracks
-        if (GetNumTracks && GetTrack && GetMediaTrackInfo_Value) {
+        if (GetNumTracks && GetTrack) {
             int num_tracks = GetNumTracks();
             for (int i = 0; i < num_tracks; i++) {
                 MediaTrack* track = GetTrack(i);
-                if (track) {
-                    double volume = GetMediaTrackInfo_Value(track, "D_VOL");
-                    char msg[256];
-                    snprintf(msg, sizeof(msg), "VOL %d %.3f\n", i + 1, volume); // Tracks start from 1
-                    send(client_socket, msg, strlen(msg), 0);
-                    m_track_cache[track] = i + 1;
-                }
+                sendTrackVolume(track, client_socket);
             }
         }
 
@@ -124,6 +128,9 @@ private:
         while (m_running) {
             int bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
             if (bytes_read <= 0) {
+                if (ShowConsoleMsg) {
+                    ShowConsoleMsg("Client disconnected\n");
+                }
                 break;
             }
 #ifdef _WIN32
@@ -236,17 +243,8 @@ public:
     virtual void Run() override {}
 
     virtual void SetSurfaceVolume(MediaTrack* track, double volume) override {
-        int track_index = findTrackIndex(track);
-
-        if (ShowConsoleMsg) {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "Volume: track_index=%d, volume=%.3f\n", track_index, volume);
-            ShowConsoleMsg(msg);
-        }
-
-        char msg[256];
-        snprintf(msg, sizeof(msg), "VOL %d %.3f\n", track_index, volume);
-        sendToAllClients(msg);
+        // Send volume update for this track
+        sendTrackVolume(track);
     }
 
     virtual void SetSurfacePan(MediaTrack *track, double pan) override {}
@@ -291,7 +289,7 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
     if (!ShowConsoleMsg) return 0;
 
     rec->Register("csurf", &csurf_reg);
-    ShowConsoleMsg("=== IPC Control Surface with Fixed Track IDs ===\n");
+    ShowConsoleMsg("=== IPC Control Surface with Simple Track IDs ===\n");
     return 1;
 }
 }

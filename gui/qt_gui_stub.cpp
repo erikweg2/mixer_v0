@@ -145,11 +145,20 @@ public:
     }
 
 public slots:
+public slots:
     void onVolumeChanged(int trackIndex, float volume) {
-        // This slot is called when the listener gets a valid message
-        if (trackIndex == 0) { // We only care about track 1 (index 0)
-            qDebug() << "QtGUI: Updating slider to" << volume;
-            m_volume_slider->setValue(static_cast<int>(volume * 100.0f));
+        // Track IDs:
+        // 0 = Master track
+        // 1 = First regular track
+        // 2 = Second regular track, etc.
+
+        if (trackIndex == 1) { // First regular track
+            qDebug() << "QtGUI: Updating slider for track" << trackIndex << "to" << volume;
+            int slider_value = static_cast<int>(volume * 100.0f);
+            m_volume_slider->setValue(slider_value);
+            m_track_label->setText(QString("Track 1 Volume: %1%").arg(slider_value));
+        } else {
+            qDebug() << "QtGUI: Ignoring track" << trackIndex << "volume:" << volume;
         }
     }
 
