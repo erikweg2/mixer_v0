@@ -33,9 +33,15 @@ endif()
 find_package(Threads REQUIRED)
 
 # Link necessary libraries
-target_link_libraries(reaper_csurf_ipc PRIVATE
-    Threads::Threads
-)
+if(APPLE)
+    target_link_libraries(reaper_csurf_ipc PRIVATE
+        Threads::Threads
+    )
+else()
+    target_link_libraries(reaper_csurf_ipc PRIVATE
+        Threads::Threads
+    )
+endif()
 
 # Tell the compiler where to find the REAPER SDK headers
 target_include_directories(reaper_csurf_ipc PRIVATE

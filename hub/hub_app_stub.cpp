@@ -1,22 +1,5 @@
 /*
- * HUB APPLICATION STUB (Component 3, Part 1)
- *
- * This is a standalone C++ application. It is the "brain" or "gateway".
- *
- * WHAT IT DOES:
- * 1.  Runs a TCP Client to connect to the REAPER Plugin on port 9001.
- * 2.  Listens for simple text messages (e.g., "VOL 0 0.75\n").
- * 3.  Runs an OSC Server on port 9000 (for the Qt GUI to connect to).
- * 4.  Translates the text message into an OSC message (e.g., /track/1/volume 0.75f).
- * 5.  Broadcasts the OSC message to all connected GUI clients.
- *
- * DEPENDENCIES:
- * - C++ Sockets library (e.g., <sys/socket.h> on Linux, Winsock on Windows)
- * - An OSC library (e.g., oscpack, tinyosc)
- *
- * COMPILE:
- * Compile as a standalone executable, linking against the OSC library and pthreads.
- * g++ hub_app_stub.cpp -o hub -lpthread -loscpack (example)
+ * HUB APPLICATION - MANUAL OSC CONSTRUCTION
  */
 
 // --- C/C++ Standard Libraries ---
@@ -24,48 +7,73 @@
 #include <string>
 #include <thread>
 #include <cstring>
+#include <vector>
 
 // --- OS-specific Networking ---
-#ifdef __APPLE__
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <netdb.h>
-#else
-// Linux headers (your existing code)
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#endif
-
-// --- OSC Library (oscpack example) ---
-// You must have oscpack headers and link the library.
-#include "osc/OscOutboundPacketStream.h"
-#include "ip/UdpSocket.h"
 
 // --- Globals ---
 #define OSC_BROADCAST_PORT 9000
 #define REAPER_PLUGIN_PORT 9001
 
-UdpTransmitSocket* g_osc_socket = nullptr;
+int g_osc_socket = -1;
+
+// Manual OSC message construction
+std::vector<char> buildOscMessage(const std::string& address, float value) {
+    std::vector<char> buffer;
+
+    // Address pattern (null-terminated, padded to 4 bytes)
+    buffer.insert(buffer.end(), address.begin(), address.end());
+    buffer.push_back('\0');
+    while (buffer.size() % 4 != 0) {
+        buffer.push_back('\0');
+    }
+
+    // Type tag (",f" null-terminated, padded to 4 bytes)
+    buffer.push_back(',');
+    buffer.push_back('f');
+    buffer.push_back('\0');
+    buffer.push_back('\0'); // Padding to 4 bytes
+
+    // Float value (big-endian, 4 bytes)
+    union {
+        float f;
+        uint32_t i;
+    } converter;
+    converter.f = value;
+
+    // Convert to big-endian
+    uint32_t be_value = htonl(converter.i);
+    char* value_bytes = reinterpret_cast<char*>(&be_value);
+    buffer.insert(buffer.end(), value_bytes, value_bytes + 4);
+
+    return buffer;
+}
 
 // --- Main Application ---
 int main() {
     std::cout << "Starting Hub Application..." << std::endl;
 
-    // --- 1. Initialize OSC Server (UdpSocket for broadcasting) ---
-    // This socket will SEND OSC messages to the Qt GUI
-    try {
-        g_osc_socket = new UdpTransmitSocket(IpEndpointName("127.0.0.1", OSC_BROADCAST_PORT));
-        std::cout << "Hub: OSC server broadcasting to 127.0.0.1:" << OSC_BROADCAST_PORT << std::endl;
-    } catch (std::exception& e) {
-        std::cerr << "Hub: Error initializing OSC socket: " << e.what() << std::endl;
+    // --- 1. Initialize OSC Socket (for broadcasting) ---
+    g_osc_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_osc_socket < 0) {
+        std::cerr << "Hub: Error creating OSC socket" << std::endl;
         return 1;
     }
-    // std::cout << "Hub: [Stub] OSC server initialized." << std::endl;
 
+    // Enable broadcast
+    int broadcast = 1;
+    setsockopt(g_osc_socket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+
+    sockaddr_in osc_addr = {};
+    osc_addr.sin_family = AF_INET;
+    osc_addr.sin_port = htons(OSC_BROADCAST_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &osc_addr.sin_addr);
+
+    std::cout << "Hub: OSC server broadcasting to 127.0.0.1:" << OSC_BROADCAST_PORT << std::endl;
 
     // --- 2. Initialize TCP Client (to connect to REAPER) ---
     int ipc_sock = -1;
@@ -112,6 +120,7 @@ int main() {
 
                     // --- 4. Translate and Broadcast ---
                     std::cout << "Hub: Received IPC: " << message << std::endl;
+                    std::cout << "Hub: Raw message length: " << message.length() << " bytes" << std::endl;
 
                     // Parse the simple "VOL TRACK VOL" message
                     char command[4];
@@ -122,24 +131,16 @@ int main() {
                         if (strcmp(command, "VOL") == 0) {
                             // Translate to OSC
                             // e.g., "VOL 0 0.75" -> /track/1/volume 0.75f
-                            // (Adding 1 to index for user-friendly track numbers)
                             std::string osc_address = "/track/" + std::to_string(track_index + 1) + "/volume";
 
                             std::cout << "Hub: Sending OSC: " << osc_address << " " << volume << std::endl;
 
-                            // --- Use oscpack to send the message ---
+                            // Build OSC message manually
+                            auto osc_message = buildOscMessage(osc_address, volume);
 
-                            char osc_buffer[1024];
-                            osc::OutboundPacketStream p(osc_buffer, sizeof(osc_buffer));
-
-                            p << osc::BeginBundleImmediate
-                              << osc::BeginMessage(osc_address.c_str())
-                              << volume
-                              << osc::EndMessage
-                              << osc::EndBundle;
-
-                            g_osc_socket->Send(p.Data(), p.Size());
-
+                            // Send OSC message
+                            sendto(g_osc_socket, osc_message.data(), osc_message.size(), 0,
+                                   (sockaddr*)&osc_addr, sizeof(osc_addr));
                         }
                     }
                 }
@@ -151,6 +152,6 @@ int main() {
         }
     }
 
-    delete g_osc_socket;
+    if (g_osc_socket >= 0) close(g_osc_socket);
     return 0;
 }
