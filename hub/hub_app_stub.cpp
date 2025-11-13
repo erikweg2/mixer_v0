@@ -1,5 +1,5 @@
 /*
- * HUB APPLICATION - MANUAL OSC CONSTRUCTION
+ * HUB APPLICATION - WITH FEEDBACK PREVENTION
  */
 
 // --- C/C++ Standard Libraries ---
@@ -8,44 +8,43 @@
 #include <thread>
 #include <cstring>
 #include <vector>
-
-// --- OS-specific Networking ---
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <poll.h>
 
 // --- Globals ---
 #define OSC_BROADCAST_PORT 9000
 #define REAPER_PLUGIN_PORT 9001
 
 int g_osc_socket = -1;
+int g_ipc_sock = -1;
 
 // Manual OSC message construction
 std::vector<char> buildOscMessage(const std::string& address, float value) {
     std::vector<char> buffer;
 
-    // Address pattern (null-terminated, padded to 4 bytes)
+    // Address pattern
     buffer.insert(buffer.end(), address.begin(), address.end());
     buffer.push_back('\0');
     while (buffer.size() % 4 != 0) {
         buffer.push_back('\0');
     }
 
-    // Type tag (",f" null-terminated, padded to 4 bytes)
+    // Type tag
     buffer.push_back(',');
     buffer.push_back('f');
     buffer.push_back('\0');
-    buffer.push_back('\0'); // Padding to 4 bytes
+    buffer.push_back('\0');
 
-    // Float value (big-endian, 4 bytes)
+    // Float value (big-endian)
     union {
         float f;
         uint32_t i;
     } converter;
     converter.f = value;
 
-    // Convert to big-endian
     uint32_t be_value = htonl(converter.i);
     char* value_bytes = reinterpret_cast<char*>(&be_value);
     buffer.insert(buffer.end(), value_bytes, value_bytes + 4);
@@ -53,101 +52,208 @@ std::vector<char> buildOscMessage(const std::string& address, float value) {
     return buffer;
 }
 
+// Parse OSC message from GUI
+bool parseOscFromGui(const char* data, size_t size, int& track_index, float& volume) {
+    if (size < 8) return false;
+
+    // Parse address
+    const char* ptr = data;
+    std::string address = ptr;
+
+    if (address.find("/track/") == 0 && address.find("/volume") != std::string::npos) {
+        // Extract track number
+        size_t start = strlen("/track/");
+        size_t end = address.find("/volume");
+        if (end != std::string::npos) {
+            std::string track_str = address.substr(start, end - start);
+            try {
+                track_index = std::stoi(track_str);
+            } catch (...) {
+                return false;
+            }
+
+            // Find type tag
+            int address_len = address.length() + 1;
+            int padded_addr_len = (address_len + 3) & ~3;
+
+            if (padded_addr_len + 4 <= (int)size) {
+                const char* type_tag = ptr + padded_addr_len;
+                if (type_tag[0] == ',' && type_tag[1] == 'f' && type_tag[2] == '\0') {
+                    int type_tag_len = 4;
+                    int data_offset = padded_addr_len + type_tag_len;
+
+                    if (data_offset + 4 <= (int)size) {
+                        const unsigned char* float_data =
+                            reinterpret_cast<const unsigned char*>(ptr + data_offset);
+
+                        union {
+                            uint32_t i;
+                            float f;
+                        } converter;
+
+                        converter.i = (float_data[0] << 24) |
+                                      (float_data[1] << 16) |
+                                      (float_data[2] << 8) |
+                                      float_data[3];
+
+                        volume = converter.f;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 // --- Main Application ---
 int main() {
-    std::cout << "Starting Hub Application..." << std::endl;
+    std::cout << "Starting Hub Application (Feedback Prevention)..." << std::endl;
 
-    // --- 1. Initialize OSC Socket (for broadcasting) ---
+    // --- 1. Initialize OSC Socket ---
     g_osc_socket = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_osc_socket < 0) {
         std::cerr << "Hub: Error creating OSC socket" << std::endl;
         return 1;
     }
 
-    // Enable broadcast
+    // Enable broadcast and reuse
     int broadcast = 1;
     setsockopt(g_osc_socket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+    int reuse = 1;
+    setsockopt(g_osc_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
-    sockaddr_in osc_addr = {};
-    osc_addr.sin_family = AF_INET;
-    osc_addr.sin_port = htons(OSC_BROADCAST_PORT);
-    inet_pton(AF_INET, "127.0.0.1", &osc_addr.sin_addr);
+    // Bind to receive from GUI
+    sockaddr_in osc_listen_addr = {};
+    osc_listen_addr.sin_family = AF_INET;
+    osc_listen_addr.sin_addr.s_addr = INADDR_ANY;
+    osc_listen_addr.sin_port = htons(OSC_BROADCAST_PORT);
 
-    std::cout << "Hub: OSC server broadcasting to 127.0.0.1:" << OSC_BROADCAST_PORT << std::endl;
+    if (bind(g_osc_socket, (sockaddr*)&osc_listen_addr, sizeof(osc_listen_addr)) < 0) {
+        std::cerr << "Hub: Error binding OSC socket" << std::endl;
+        close(g_osc_socket);
+        return 1;
+    }
 
-    // --- 2. Initialize TCP Client (to connect to REAPER) ---
-    int ipc_sock = -1;
-    sockaddr_in plugin_addr = {};
-    plugin_addr.sin_family = AF_INET;
-    plugin_addr.sin_port = htons(REAPER_PLUGIN_PORT);
-    inet_pton(AF_INET, "127.0.0.1", &plugin_addr.sin_addr);
+    sockaddr_in osc_send_addr = {};
+    osc_send_addr.sin_family = AF_INET;
+    osc_send_addr.sin_port = htons(OSC_BROADCAST_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &osc_send_addr.sin_addr);
 
-    // Connection loop
+    std::cout << "Hub: OSC server listening and broadcasting on 127.0.0.1:" << OSC_BROADCAST_PORT << std::endl;
+
+    // --- 2. Main processing loop ---
     while (true) {
         try {
-            ipc_sock = socket(AF_INET, SOCK_STREAM, 0);
-            if (ipc_sock < 0) {
+            // Connect to REAPER plugin
+            g_ipc_sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (g_ipc_sock < 0) {
                 throw std::runtime_error("Failed to create socket");
             }
 
+            sockaddr_in plugin_addr = {};
+            plugin_addr.sin_family = AF_INET;
+            plugin_addr.sin_port = htons(REAPER_PLUGIN_PORT);
+            inet_pton(AF_INET, "127.0.0.1", &plugin_addr.sin_addr);
+
             std::cout << "Hub: Connecting to REAPER plugin on 127.0.0.1:" << REAPER_PLUGIN_PORT << "..." << std::endl;
-            if (connect(ipc_sock, (sockaddr*)&plugin_addr, sizeof(plugin_addr)) < 0) {
+            if (connect(g_ipc_sock, (sockaddr*)&plugin_addr, sizeof(plugin_addr)) < 0) {
                 throw std::runtime_error("Failed to connect");
             }
 
             std::cout << "Hub: Connected to REAPER plugin!" << std::endl;
 
-            // --- 3. Main processing loop ---
+            // Setup polling for multiple sockets
+            struct pollfd fds[2];
+            fds[0].fd = g_ipc_sock;      // Plugin TCP connection
+            fds[0].events = POLLIN;
+            fds[1].fd = g_osc_socket;    // GUI OSC messages
+            fds[1].events = POLLIN;
+
             char read_buffer[1024];
             std::string line_buffer;
 
             while (true) {
-                int bytes_read = recv(ipc_sock, read_buffer, sizeof(read_buffer) - 1, 0);
-                if (bytes_read <= 0) {
-                    std::cout << "Hub: REAPER plugin disconnected." << std::endl;
-                    close(ipc_sock);
-                    break; // Break to outer loop to reconnect
+                int poll_result = poll(fds, 2, 100); // 100ms timeout
+
+                if (poll_result < 0) {
+                    throw std::runtime_error("Poll error");
                 }
 
-                read_buffer[bytes_read] = '\0';
-                line_buffer += read_buffer;
+                if (poll_result == 0) {
+                    continue; // Timeout, no data
+                }
 
-                // Process all complete lines (ending in '\n')
-                size_t newline_pos;
-                while ((newline_pos = line_buffer.find('\n')) != std::string::npos) {
-                    std::string message = line_buffer.substr(0, newline_pos);
-                    line_buffer.erase(0, newline_pos + 1);
+                // Check for data from REAPER plugin (STATE UPDATES)
+                if (fds[0].revents & POLLIN) {
+                    int bytes_read = recv(g_ipc_sock, read_buffer, sizeof(read_buffer) - 1, 0);
+                    if (bytes_read <= 0) {
+                        std::cout << "Hub: REAPER plugin disconnected." << std::endl;
+                        close(g_ipc_sock);
+                        break;
+                    }
 
-                    // --- 4. Translate and Broadcast ---
-                    std::cout << "Hub: Received IPC: " << message << std::endl;
-                    std::cout << "Hub: Raw message length: " << message.length() << " bytes" << std::endl;
+                    read_buffer[bytes_read] = '\0';
+                    line_buffer += read_buffer;
 
-                    // Parse the simple "VOL TRACK VOL" message
-                    char command[4];
-                    int track_index;
-                    float volume;
+                    // Process all complete lines
+                    size_t newline_pos;
+                    while ((newline_pos = line_buffer.find('\n')) != std::string::npos) {
+                        std::string message = line_buffer.substr(0, newline_pos);
+                        line_buffer.erase(0, newline_pos + 1);
 
-                    if (sscanf(message.c_str(), "%3s %d %f", command, &track_index, &volume) == 3) {
-                        if (strcmp(command, "VOL") == 0) {
-                            // Translate to OSC
-                            // e.g., "VOL 0 0.75" -> /track/1/volume 0.75f
-                            std::string osc_address = "/track/" + std::to_string(track_index + 1) + "/volume";
+                        // Only process VOL messages (state updates from REAPER)
+                        if (message.find("VOL ") == 0) {
+                            std::cout << "Hub: Received STATE from Plugin: " << message << std::endl;
 
-                            std::cout << "Hub: Sending OSC: " << osc_address << " " << volume << std::endl;
+                            // Parse "VOL TRACK VOL" message
+                            char command[4];
+                            int track_index;
+                            float volume;
 
-                            // Build OSC message manually
-                            auto osc_message = buildOscMessage(osc_address, volume);
+                            if (sscanf(message.c_str(), "%3s %d %f", command, &track_index, &volume) == 3) {
+                                if (strcmp(command, "VOL") == 0) {
+                                    std::string osc_address = "/track/" + std::to_string(track_index) + "/volume";
+                                    std::cout << "Hub: Sending STATE to GUI: " << osc_address << " " << volume << std::endl;
 
-                            // Send OSC message
-                            sendto(g_osc_socket, osc_message.data(), osc_message.size(), 0,
-                                   (sockaddr*)&osc_addr, sizeof(osc_addr));
+                                    auto osc_message = buildOscMessage(osc_address, volume);
+                                    sendto(g_osc_socket, osc_message.data(), osc_message.size(), 0,
+                                           (sockaddr*)&osc_send_addr, sizeof(osc_send_addr));
+                                }
+                            }
+                        }
+                        // Ignore other message types from plugin
+                    }
+                }
+
+                // Check for data from GUI (CONTROL COMMANDS)
+                if (fds[1].revents & POLLIN) {
+                    sockaddr_in gui_addr;
+                    socklen_t gui_addr_len = sizeof(gui_addr);
+                    int bytes_read = recvfrom(g_osc_socket, read_buffer, sizeof(read_buffer) - 1, 0,
+                                              (sockaddr*)&gui_addr, &gui_addr_len);
+
+                    if (bytes_read > 0) {
+                        read_buffer[bytes_read] = '\0';
+
+                        int track_index;
+                        float volume;
+                        if (parseOscFromGui(read_buffer, bytes_read, track_index, volume)) {
+                            std::cout << "Hub: Received COMMAND from GUI: Track " << track_index << " Volume " << volume << std::endl;
+
+                            // Forward to REAPER plugin as CONTROL command
+                            char message[256];
+                            snprintf(message, sizeof(message), "SET_VOL %d %.3f\n", track_index, volume);
+                            send(g_ipc_sock, message, strlen(message), 0);
+                            std::cout << "Hub: Sent COMMAND to Plugin: " << message;
                         }
                     }
                 }
             }
         } catch (std::exception& e) {
             std::cerr << "Hub: Error: " << e.what() << ". Retrying in 5s..." << std::endl;
-            if (ipc_sock >= 0) close(ipc_sock);
+            if (g_ipc_sock >= 0) close(g_ipc_sock);
             std::this_thread::sleep_for(std::chrono::seconds(5));
         }
     }

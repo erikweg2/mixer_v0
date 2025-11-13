@@ -1,5 +1,5 @@
 /*
- * QT GUI APPLICATION - SIMPLIFIED OSC PARSING
+ * QT GUI APPLICATION - BIDIRECTIONAL CONTROL
  */
 
 #include <QApplication>
@@ -15,82 +15,106 @@
 #include <QDataStream>
 
 #define OSC_LISTEN_PORT 9000
+#define OSC_SEND_PORT 9000  // Send to Hub (same port)
 
-// --- OSC Listener Class ---
-class OscListener : public QObject {
+// --- OSC Listener & Sender Class ---
+class OscHandler : public QObject {
     Q_OBJECT
 
 public:
-    OscListener(QObject* parent = nullptr) : QObject(parent) {
-        m_socket = new QUdpSocket(this);
-
-        // Bind to the port the Hub is broadcasting to
-        if (m_socket->bind(QHostAddress::LocalHost, OSC_LISTEN_PORT)) {
+    OscHandler(QObject* parent = nullptr) : QObject(parent) {
+        // Setup receive socket
+        m_receive_socket = new QUdpSocket(this);
+        if (m_receive_socket->bind(QHostAddress::LocalHost, OSC_LISTEN_PORT)) {
             qDebug() << "QtGUI: OSC Listener bound to" << OSC_LISTEN_PORT;
-            connect(m_socket, &QUdpSocket::readyRead, this, &OscListener::onReadyRead);
+            connect(m_receive_socket, &QUdpSocket::readyRead, this, &OscHandler::onReadyRead);
         } else {
             qDebug() << "QtGUI: Failed to bind to port" << OSC_LISTEN_PORT;
         }
+
+        // Setup send socket
+        m_send_socket = new QUdpSocket(this);
+    }
+
+    void sendVolume(int trackIndex, float volume) {
+        // Build OSC message manually: /track/X/volume f value
+        QByteArray osc_message;
+
+        // Address pattern: /track/X/volume
+        QString address = QString("/track/%1/volume").arg(trackIndex);
+        osc_message.append(address.toUtf8());
+        osc_message.append('\0');
+
+        // Pad to 4 bytes
+        while (osc_message.size() % 4 != 0) {
+            osc_message.append('\0');
+        }
+
+        // Type tag: ",f"
+        osc_message.append(',');
+        osc_message.append('f');
+        osc_message.append('\0');
+        osc_message.append('\0'); // Pad to 4 bytes
+
+        // Float value (big-endian)
+        union {
+            float f;
+            uint32_t i;
+        } converter;
+        converter.f = volume;
+
+        // Convert to big-endian
+        uint32_t be_value = qToBigEndian(converter.i);
+        osc_message.append(reinterpret_cast<const char*>(&be_value), 4);
+
+        // Send to Hub
+        m_send_socket->writeDatagram(osc_message, QHostAddress::LocalHost, OSC_SEND_PORT);
+        qDebug() << "QtGUI: Sent OSC:" << address << volume;
     }
 
 signals:
-    // Signal to emit when a volume message is parsed
     void volumeChanged(int trackIndex, float volume);
 
 private slots:
     void onReadyRead() {
-        while (m_socket->hasPendingDatagrams()) {
+        while (m_receive_socket->hasPendingDatagrams()) {
             QByteArray datagram;
-            datagram.resize(m_socket->pendingDatagramSize());
-            m_socket->readDatagram(datagram.data(), datagram.size());
+            datagram.resize(m_receive_socket->pendingDatagramSize());
+            m_receive_socket->readDatagram(datagram.data(), datagram.size());
 
             qDebug() << "QtGUI: Received UDP packet of size" << datagram.size();
-
-            // Simple manual OSC parsing to avoid library issues
             parseOscManually(datagram);
         }
     }
 
 private:
     void parseOscManually(const QByteArray& data) {
-        // Basic OSC message structure:
-        // - Null-terminated address string (aligned to 4 bytes)
-        // - Type tag string starting with ',' (aligned to 4 bytes)
-        // - Data (aligned to 4 bytes)
+        if (data.size() < 8) return;
 
-        if (data.size() < 8) return; // Minimum size for address + type tag
-
-        // Parse address
         const char* ptr = data.constData();
         QString address = QString::fromUtf8(ptr);
 
         qDebug() << "QtGUI: Raw address:" << address;
 
-        // Check if it's a volume message
         if (address.startsWith("/track/") && address.contains("/volume")) {
-            // Parse track number
             QStringList parts = address.split('/');
             if (parts.size() >= 3) {
                 bool ok;
                 int track_index = parts[2].toInt(&ok);
                 if (ok) {
-                    // Find type tag
-                    int address_len = address.length() + 1; // Include null terminator
-                    int padded_addr_len = (address_len + 3) & ~3; // Align to 4 bytes
+                    int address_len = address.length() + 1;
+                    int padded_addr_len = (address_len + 3) & ~3;
 
                     if (padded_addr_len + 4 <= data.size()) {
                         const char* type_tag = ptr + padded_addr_len;
                         if (type_tag[0] == ',' && type_tag[1] == 'f' && type_tag[2] == '\0') {
-                            // Type tag is ",f" - we have a float
-                            int type_tag_len = 4; // ",f" + null + padding
+                            int type_tag_len = 4;
                             int data_offset = padded_addr_len + type_tag_len;
 
                             if (data_offset + 4 <= data.size()) {
-                                // Extract float (OSC uses big-endian)
                                 const unsigned char* float_data =
                                     reinterpret_cast<const unsigned char*>(ptr + data_offset);
 
-                                // Convert from big-endian to host byte order
                                 union {
                                     uint32_t i;
                                     float f;
@@ -104,7 +128,7 @@ private:
                                 float volume = converter.f;
 
                                 qDebug() << "QtGUI: Parsed volume - Track:" << track_index << "Volume:" << volume;
-                                emit volumeChanged(track_index - 1, volume); // Convert to 0-index
+                                emit volumeChanged(track_index, volume);
                             }
                         }
                     }
@@ -113,7 +137,8 @@ private:
         }
     }
 
-    QUdpSocket* m_socket;
+    QUdpSocket* m_receive_socket;
+    QUdpSocket* m_send_socket;
 };
 
 // --- Main Window Class ---
@@ -122,50 +147,66 @@ class MainWindow : public QMainWindow {
 
 public:
     MainWindow(QWidget* parent = nullptr) : QMainWindow(parent) {
-        setWindowTitle("Mixer GUI (Stub)");
+        setWindowTitle("Mixer GUI - Bidirectional Control");
 
         // --- Setup GUI ---
         QWidget* central_widget = new QWidget(this);
         QVBoxLayout* layout = new QVBoxLayout(central_widget);
 
-        m_track_label = new QLabel("Track 1 Volume:", this);
+        m_track_label = new QLabel("Track 1 Volume: 50%", this);
         m_volume_slider = new QSlider(Qt::Horizontal, this);
         m_volume_slider->setRange(0, 100);
-        m_volume_slider->setEnabled(false); // Read-only
+        m_volume_slider->setValue(50); // Default position
 
         layout->addWidget(m_track_label);
         layout->addWidget(m_volume_slider);
         setCentralWidget(central_widget);
 
-        // --- Setup OSC Listener ---
-        m_listener = new OscListener(this);
+        // --- Setup OSC Handler ---
+        m_osc_handler = new OscHandler(this);
 
-        // --- Connect OSC signal to GUI slot ---
-        connect(m_listener, &OscListener::volumeChanged, this, &MainWindow::onVolumeChanged);
+        // --- Connect signals ---
+        // OSC → GUI updates
+        connect(m_osc_handler, &OscHandler::volumeChanged, this, &MainWindow::onVolumeChangedFromReaper);
+
+        // GUI → OSC sends
+        connect(m_volume_slider, &QSlider::valueChanged, this, &MainWindow::onSliderMoved);
+
+        // Prevent feedback loop - only send when user interacts
+        m_volume_slider->setTracking(true);
     }
 
-public slots:
-public slots:
-    void onVolumeChanged(int trackIndex, float volume) {
-        // Track IDs:
-        // 0 = Master track
-        // 1 = First regular track
-        // 2 = Second regular track, etc.
+private slots:
+    void onVolumeChangedFromReaper(int trackIndex, float volume) {
+        if (trackIndex == 1) {
+            // Only update if the change is significant (prevents jitter)
+            float current_volume = m_volume_slider->value() / 100.0f;
+            if (fabs(current_volume - volume) > 0.001f) {
+                qDebug() << "QtGUI: REAPER updated track" << trackIndex << "to" << volume;
 
-        if (trackIndex == 1) { // First regular track
-            qDebug() << "QtGUI: Updating slider for track" << trackIndex << "to" << volume;
-            int slider_value = static_cast<int>(volume * 100.0f);
-            m_volume_slider->setValue(slider_value);
-            m_track_label->setText(QString("Track 1 Volume: %1%").arg(slider_value));
-        } else {
-            qDebug() << "QtGUI: Ignoring track" << trackIndex << "volume:" << volume;
+                m_volume_slider->blockSignals(true);
+                int slider_value = static_cast<int>(volume * 100.0f);
+                m_volume_slider->setValue(slider_value);
+                m_track_label->setText(QString("Track 1 Volume: %1%").arg(slider_value));
+                m_volume_slider->blockSignals(false);
+            }
         }
+    }
+
+    void onSliderMoved(int value) {
+        // This is called when user moves the slider
+        float volume = value / 100.0f;
+        qDebug() << "QtGUI: User moved slider to" << value << "(" << volume << ")";
+        m_track_label->setText(QString("Track 1 Volume: %1%").arg(value));
+
+        // Send volume command to REAPER
+        m_osc_handler->sendVolume(1, volume);
     }
 
 private:
     QLabel* m_track_label;
     QSlider* m_volume_slider;
-    OscListener* m_listener;
+    OscHandler* m_osc_handler;
 };
 
 // --- Main Application Entry ---

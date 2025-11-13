@@ -1,5 +1,5 @@
 /*
- * REAPER PLUGIN WITH SIMPLIFIED TRACK HANDLING
+ * REAPER PLUGIN - WITH FEEDBACK PREVENTION
  */
 
 #include "WDL/wdltypes.h"
@@ -31,9 +31,11 @@ extern "C" {
 // Global function pointers
 void (*ShowConsoleMsg)(const char*) = nullptr;
 double (*GetMediaTrackInfo_Value)(MediaTrack* track, const char* parmname) = nullptr;
+void (*SetMediaTrackInfo_Value)(MediaTrack* track, const char* parmname, double newValue) = nullptr;
 int (*GetNumTracks)() = nullptr;
 MediaTrack* (*GetTrack)(int index) = nullptr;
 MediaTrack* (*GetMasterTrack)(int proj) = nullptr;
+bool (*TrackList_AdjustWindows)(bool isMinor) = nullptr;
 
 class CSurf_IPC : public IReaperControlSurface {
 private:
@@ -43,23 +45,21 @@ private:
     std::mutex m_clients_mutex;
     std::set<int> m_client_sockets;
 
-    // Simple track identification - we'll use a counter and map tracks as we see them
+    // Feedback prevention
+    std::atomic<bool> m_ignore_callbacks{false};
     std::map<MediaTrack*, int> m_track_map;
-    int m_next_track_id{1}; // Start from 1, 0 is reserved for master
+    int m_next_track_id{1};
 
     int getTrackId(MediaTrack* track) {
-        // Check if it's the master track
         if (GetMasterTrack && track == GetMasterTrack(0)) {
             return 0;
         }
 
-        // Check if we've seen this track before
         auto it = m_track_map.find(track);
         if (it != m_track_map.end()) {
             return it->second;
         }
 
-        // New track - assign it an ID
         int new_id = m_next_track_id++;
         m_track_map[track] = new_id;
 
@@ -70,6 +70,33 @@ private:
         }
 
         return new_id;
+    }
+
+    MediaTrack* getTrackById(int track_id) {
+        if (track_id == 0) {
+            return GetMasterTrack ? GetMasterTrack(0) : nullptr;
+        }
+
+        // Search for track with this ID
+        for (auto& pair : m_track_map) {
+            if (pair.second == track_id) {
+                return pair.first;
+            }
+        }
+
+        // If not found in map, try by index (track_id 1 = index 0, etc.)
+        if (GetNumTracks && GetTrack) {
+            int num_tracks = GetNumTracks();
+            if (track_id > 0 && track_id <= num_tracks) {
+                MediaTrack* track = GetTrack(track_id - 1);
+                if (track) {
+                    m_track_map[track] = track_id;
+                    return track;
+                }
+            }
+        }
+
+        return nullptr;
     }
 
     void sendToAllClients(const std::string& message) {
@@ -89,10 +116,8 @@ private:
         snprintf(msg, sizeof(msg), "VOL %d %.3f\n", track_id, volume);
 
         if (client_socket >= 0) {
-            // Send to specific client
             send(client_socket, msg, strlen(msg), 0);
         } else {
-            // Send to all clients
             sendToAllClients(msg);
         }
 
@@ -103,18 +128,73 @@ private:
         }
     }
 
-    void handleClient(int client_socket) {
-        if (ShowConsoleMsg) {
-            ShowConsoleMsg("New client connected - sending all track volumes\n");
+    void setTrackVolume(int track_id, float volume) {
+        MediaTrack* track = getTrackById(track_id);
+        if (!track || !SetMediaTrackInfo_Value) {
+            if (ShowConsoleMsg) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "Cannot find track with ID %d\n", track_id);
+                ShowConsoleMsg(msg);
+            }
+            return;
         }
 
-        // Send master track volume (ID 0)
+        if (ShowConsoleMsg) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Setting track %d volume to %.3f\n", track_id, volume);
+            ShowConsoleMsg(msg);
+        }
+
+        // IGNORE callbacks while we set the volume programmatically
+        m_ignore_callbacks = true;
+
+        // Set the volume in REAPER
+        SetMediaTrackInfo_Value(track, "D_VOL", volume);
+
+        // Refresh UI
+        if (TrackList_AdjustWindows) {
+            TrackList_AdjustWindows(false);
+        }
+
+// Small delay to ensure the set operation completes
+#ifdef _WIN32
+        Sleep(10);
+#else
+        usleep(10000);
+#endif
+
+        // RE-ENABLE callbacks
+        m_ignore_callbacks = false;
+    }
+
+    void processClientCommand(const std::string& command) {
+        if (ShowConsoleMsg) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Processing command: %s\n", command.c_str());
+            ShowConsoleMsg(msg);
+        }
+
+        // Parse SET_VOL commands: "SET_VOL track_id volume"
+        if (command.find("SET_VOL") == 0) {
+            int track_id;
+            float volume;
+            if (sscanf(command.c_str(), "SET_VOL %d %f", &track_id, &volume) == 2) {
+                setTrackVolume(track_id, volume);
+            }
+        }
+    }
+
+    void handleClient(int client_socket) {
+        if (ShowConsoleMsg) {
+            ShowConsoleMsg("New client connected\n");
+        }
+
+        // Send initial track volumes
         if (GetMasterTrack) {
             MediaTrack* master_track = GetMasterTrack(0);
             sendTrackVolume(master_track, client_socket);
         }
 
-        // Send all regular tracks
         if (GetNumTracks && GetTrack) {
             int num_tracks = GetNumTracks();
             for (int i = 0; i < num_tracks; i++) {
@@ -123,8 +203,10 @@ private:
             }
         }
 
-        // Keep connection open
+        // Handle client communication
         char buffer[1024];
+        std::string line_buffer;
+
         while (m_running) {
             int bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
             if (bytes_read <= 0) {
@@ -133,10 +215,23 @@ private:
                 }
                 break;
             }
+
+            buffer[bytes_read] = '\0';
+            line_buffer += buffer;
+
+            // Process complete lines
+            size_t newline_pos;
+            while ((newline_pos = line_buffer.find('\n')) != std::string::npos) {
+                std::string command = line_buffer.substr(0, newline_pos);
+                line_buffer.erase(0, newline_pos + 1);
+
+                processClientCommand(command);
+            }
+
 #ifdef _WIN32
-            Sleep(100);
+            Sleep(10);
 #else
-            usleep(100000);
+            usleep(10000);
 #endif
         }
 
@@ -243,7 +338,23 @@ public:
     virtual void Run() override {}
 
     virtual void SetSurfaceVolume(MediaTrack* track, double volume) override {
-        // Send volume update for this track
+        // IGNORE callbacks if we're currently setting volumes programmatically
+        if (m_ignore_callbacks) {
+            if (ShowConsoleMsg) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "Ignoring callback (programmatic change): track=%p, volume=%.3f\n", track, volume);
+                ShowConsoleMsg(msg);
+            }
+            return;
+        }
+
+        // This is a genuine user change from REAPER - send to clients
+        if (ShowConsoleMsg) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "User changed volume: track=%p, volume=%.3f\n", track, volume);
+            ShowConsoleMsg(msg);
+        }
+
         sendTrackVolume(track);
     }
 
@@ -281,15 +392,17 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
     if (rec->GetFunc) {
         ShowConsoleMsg = (void (*)(const char*))rec->GetFunc("ShowConsoleMsg");
         GetMediaTrackInfo_Value = (double (*)(MediaTrack*, const char*))rec->GetFunc("GetMediaTrackInfo_Value");
+        SetMediaTrackInfo_Value = (void (*)(MediaTrack*, const char*, double))rec->GetFunc("SetMediaTrackInfo_Value");
         GetNumTracks = (int (*)())rec->GetFunc("GetNumTracks");
         GetTrack = (MediaTrack* (*)(int))rec->GetFunc("GetTrack");
         GetMasterTrack = (MediaTrack* (*)(int))rec->GetFunc("GetMasterTrack");
+        TrackList_AdjustWindows = (bool (*)(bool))rec->GetFunc("TrackList_AdjustWindows");
     }
 
     if (!ShowConsoleMsg) return 0;
 
     rec->Register("csurf", &csurf_reg);
-    ShowConsoleMsg("=== IPC Control Surface with Simple Track IDs ===\n");
+    ShowConsoleMsg("=== IPC Control Surface - Feedback Prevention Loaded ===\n");
     return 1;
 }
 }
