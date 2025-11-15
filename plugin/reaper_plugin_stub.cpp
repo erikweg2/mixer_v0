@@ -1,5 +1,5 @@
 /*
- * REAPER PLUGIN - WITH FEEDBACK PREVENTION
+ * REAPER PLUGIN - 12-BIT RESOLUTION SUPPORT
  */
 
 #include "WDL/wdltypes.h"
@@ -112,8 +112,9 @@ private:
         double volume = GetMediaTrackInfo_Value(track, "D_VOL");
         int track_id = getTrackId(track);
 
+        // Send with high precision (6 decimal places)
         char msg[256];
-        snprintf(msg, sizeof(msg), "VOL %d %.3f\n", track_id, volume);
+        snprintf(msg, sizeof(msg), "VOL %d %.6f\n", track_id, volume);
 
         if (client_socket >= 0) {
             send(client_socket, msg, strlen(msg), 0);
@@ -141,14 +142,14 @@ private:
 
         if (ShowConsoleMsg) {
             char msg[256];
-            snprintf(msg, sizeof(msg), "Setting track %d volume to %.3f\n", track_id, volume);
+            snprintf(msg, sizeof(msg), "Setting track %d volume to %.6f\n", track_id, volume);
             ShowConsoleMsg(msg);
         }
 
         // IGNORE callbacks while we set the volume programmatically
         m_ignore_callbacks = true;
 
-        // Set the volume in REAPER
+        // Set the volume in REAPER with full precision
         SetMediaTrackInfo_Value(track, "D_VOL", volume);
 
         // Refresh UI
@@ -174,12 +175,16 @@ private:
             ShowConsoleMsg(msg);
         }
 
-        // Parse SET_VOL commands: "SET_VOL track_id volume"
+        // Parse SET_VOL commands: "SET_VOL track_id volume" with high precision
         if (command.find("SET_VOL") == 0) {
             int track_id;
             float volume;
             if (sscanf(command.c_str(), "SET_VOL %d %f", &track_id, &volume) == 2) {
                 setTrackVolume(track_id, volume);
+            } else {
+                if (ShowConsoleMsg) {
+                    ShowConsoleMsg("Failed to parse SET_VOL command\n");
+                }
             }
         }
     }
@@ -189,7 +194,7 @@ private:
             ShowConsoleMsg("New client connected\n");
         }
 
-        // Send initial track volumes
+        // Send initial track volumes with high precision
         if (GetMasterTrack) {
             MediaTrack* master_track = GetMasterTrack(0);
             sendTrackVolume(master_track, client_socket);
@@ -253,7 +258,10 @@ private:
 #endif
 
         m_server_socket = socket(AF_INET, SOCK_STREAM, 0);
-        if (m_server_socket < 0) return;
+        if (m_server_socket < 0) {
+            if (ShowConsoleMsg) ShowConsoleMsg("Failed to create server socket\n");
+            return;
+        }
 
         int opt = 1;
         setsockopt(m_server_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
@@ -264,6 +272,7 @@ private:
         server_addr.sin_port = htons(PLUGIN_PORT);
 
         if (bind(m_server_socket, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            if (ShowConsoleMsg) ShowConsoleMsg("Failed to bind server socket\n");
 #ifdef _WIN32
             closesocket(m_server_socket);
 #else
@@ -342,7 +351,7 @@ public:
         if (m_ignore_callbacks) {
             if (ShowConsoleMsg) {
                 char msg[256];
-                snprintf(msg, sizeof(msg), "Ignoring callback (programmatic change): track=%p, volume=%.3f\n", track, volume);
+                snprintf(msg, sizeof(msg), "Ignoring callback (programmatic change): track=%p, volume=%.6f\n", track, volume);
                 ShowConsoleMsg(msg);
             }
             return;
@@ -351,7 +360,7 @@ public:
         // This is a genuine user change from REAPER - send to clients
         if (ShowConsoleMsg) {
             char msg[256];
-            snprintf(msg, sizeof(msg), "User changed volume: track=%p, volume=%.3f\n", track, volume);
+            snprintf(msg, sizeof(msg), "User changed volume: track=%p, volume=%.6f\n", track, volume);
             ShowConsoleMsg(msg);
         }
 
@@ -402,7 +411,7 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
     if (!ShowConsoleMsg) return 0;
 
     rec->Register("csurf", &csurf_reg);
-    ShowConsoleMsg("=== IPC Control Surface - Feedback Prevention Loaded ===\n");
+    ShowConsoleMsg("=== IPC Control Surface - 12-Bit Resolution Support Loaded ===\n");
     return 1;
 }
 }

@@ -217,11 +217,12 @@ int main() {
                         if (message.find("VOL ") == 0) {
                             std::cout << "Hub: Received STATE from Plugin: " << message << std::endl;
 
-                            // Parse "VOL TRACK VOL" message
+                            // Parse "VOL TRACK VOL" message with higher precision
                             char command[4];
                             int track_index;
                             float volume;
 
+                            // Use %f for full precision
                             if (sscanf(message.c_str(), "%3s %d %f", command, &track_index, &volume) == 3) {
                                 if (strcmp(command, "VOL") == 0) {
                                     std::string osc_address = "/track/" + std::to_string(track_index) + "/volume";
