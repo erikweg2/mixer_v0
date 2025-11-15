@@ -41,3 +41,4 @@
 *.dwo
 /build
 /libs/oscpack/build
+/gui/GUI_v0/build
