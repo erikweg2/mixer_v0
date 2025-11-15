@@ -128,7 +128,7 @@ ChannelStrip::ChannelStrip(int channelId, QWidget *parent)
     m_fader = new QSlider(Qt::Vertical);
     m_fader->setObjectName("mainFader");
     m_fader->setRange(0, 1000); // Higher resolution for smoother movement
-    m_fader->setValue(750); // Start at unity gain (0 dB)
+    m_fader->setValue(volumeToFaderPosition(1.0)); // Start at unity gain (0 dB)
     m_fader->setMinimumHeight(200);
     connect(m_fader, &QSlider::valueChanged, this, &ChannelStrip::onFaderValueChanged);
     faderLayout->addWidget(m_fader, 3);
@@ -203,20 +203,59 @@ void ChannelStrip::onFaderValueChanged(int value)
 
 int ChannelStrip::volumeToFaderPosition(double volume)
 {
-    // Convert linear volume (0.0-4.0) to fader position (0-1000)
-    // REAPER uses 0.0-4.0 range where 1.0 = 0 dB
+    // Professional logarithmic fader scaling for 12-bit resolution (0-1000 range)
+    static constexpr double MIN_DB = -100.0;
+    static constexpr double MAX_DB = 12.0;
+
     if (volume <= 0.0) return 0;
 
-    // Simple linear mapping for now - can be improved with logarithmic scaling
-    double normalized = qBound(0.0, volume / 4.0, 1.0);
+    // Convert linear volume to dB
+    double db = 20.0 * log10(volume);
+    db = qBound(MIN_DB, db, MAX_DB);
+
+    // Multi-segment scaling for professional fader response
+    double normalized;
+    if (db <= -60.0) {
+        // Ultra-fine resolution: -100 dB to -60 dB (first 10% of travel)
+        normalized = (db + 100.0) / 40.0 * 0.1;
+    } else if (db <= -20.0) {
+        // Fine resolution: -60 dB to -20 dB (next 30% of travel)
+        normalized = 0.1 + (db + 60.0) / 40.0 * 0.3;
+    } else {
+        // Standard resolution: -20 dB to +12 dB (last 60% of travel)
+        normalized = 0.4 + (db + 20.0) / 32.0 * 0.6;
+    }
+
+    normalized = qBound(0.0, normalized, 1.0);
     return static_cast<int>(normalized * 1000);
 }
 
 double ChannelStrip::faderPositionToVolume(int position)
 {
-    // Convert fader position (0-1000) to linear volume (0.0-4.0)
+    // Professional logarithmic fader scaling - inverse of volumeToFaderPosition
+    static constexpr double MIN_DB = -100.0;
+    static constexpr double MAX_DB = 12.0;
+
+    if (position <= 0) return 0.0;
+
     double normalized = static_cast<double>(position) / 1000.0;
-    return normalized * 4.0;
+    double db;
+
+    // Inverse of the scaling curve
+    if (normalized <= 0.1) {
+        // -100 dB to -60 dB
+        db = -100.0 + (normalized / 0.1) * 40.0;
+    } else if (normalized <= 0.4) {
+        // -60 dB to -20 dB
+        db = -60.0 + ((normalized - 0.1) / 0.3) * 40.0;
+    } else {
+        // -20 dB to +12 dB
+        db = -20.0 + ((normalized - 0.4) / 0.6) * 32.0;
+    }
+
+    // Convert dB to linear volume
+    if (db <= MIN_DB) return 0.0;
+    return pow(10.0, db / 20.0);
 }
 
 void ChannelStrip::updateEqBand(int bandIndex, double freq, double gain, double q)

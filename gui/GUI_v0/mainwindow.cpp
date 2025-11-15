@@ -130,6 +130,8 @@ void MainWindow::parseOscMessage(const QByteArray &data)
     const char* ptr = data.constData();
     QString address = QString::fromUtf8(ptr);
 
+    qDebug() << "GUI: Received OSC message:" << address;
+
     if (address.startsWith("/track/") && address.contains("/volume")) {
         QStringList parts = address.split('/');
         if (parts.size() >= 3) {
@@ -210,9 +212,13 @@ void MainWindow::sendVolumeToReaper(int channelId, double volume)
     QString address = QString("/track/%1/volume").arg(channelId);
     QByteArray osc_message = buildOscMessage(address, static_cast<float>(volume));
 
-    m_oscSendSocket->writeDatagram(osc_message, QHostAddress(HUB_HOST), OSC_SEND_PORT);
+    qint64 bytesSent = m_oscSendSocket->writeDatagram(osc_message, QHostAddress(HUB_HOST), OSC_SEND_PORT);
 
-    qDebug() << "GUI: Sent volume to REAPER - Track:" << channelId << "Volume:" << volume;
+    if (bytesSent > 0) {
+        qDebug() << "GUI: Sent volume to REAPER - Track:" << channelId << "Volume:" << volume;
+    } else {
+        qDebug() << "GUI: Failed to send volume to REAPER - Track:" << channelId;
+    }
 }
 
 void MainWindow::reconnectTimerTimeout()
