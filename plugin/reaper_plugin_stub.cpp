@@ -1,5 +1,5 @@
 /*
- * REAPER PLUGIN - 12-BIT RESOLUTION SUPPORT
+ * REAPER PLUGIN - 12-BIT RESOLUTION SUPPORT - OPTIMIZED
  */
 
 #include "WDL/wdltypes.h"
@@ -24,6 +24,7 @@ extern "C" {
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <netinet/tcp.h>
 #endif
 
 #define PLUGIN_PORT 9001
@@ -146,26 +147,26 @@ private:
             ShowConsoleMsg(msg);
         }
 
-        // IGNORE callbacks while we set the volume programmatically
+        // Use atomic flag to prevent feedback - more precise timing
         m_ignore_callbacks = true;
 
-        // Set the volume in REAPER with full precision
+        // Set the volume in REAPER with full precision - IMMEDIATE
         SetMediaTrackInfo_Value(track, "D_VOL", volume);
 
-        // Refresh UI
+        // Minimal delay for REAPER to process the change
+#ifdef _WIN32
+        Sleep(1);  // Reduced from 10ms to 1ms
+#else
+        usleep(1000); // Reduced from 10000μs to 1000μs
+#endif
+
+        // RE-ENABLE callbacks immediately
+        m_ignore_callbacks = false;
+
+        // Optional: Force UI refresh if needed
         if (TrackList_AdjustWindows) {
             TrackList_AdjustWindows(false);
         }
-
-// Small delay to ensure the set operation completes
-#ifdef _WIN32
-        Sleep(10);
-#else
-        usleep(10000);
-#endif
-
-        // RE-ENABLE callbacks
-        m_ignore_callbacks = false;
     }
 
     void processClientCommand(const std::string& command) {
@@ -189,7 +190,19 @@ private:
         }
     }
 
+    void optimizeSocket(int socket) {
+        int no_delay = 1;
+        setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, (char*)&no_delay, sizeof(no_delay));
+
+        int buf_size = 65536;
+        setsockopt(socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
+        setsockopt(socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
+    }
+
     void handleClient(int client_socket) {
+        // Optimize socket for low latency
+        optimizeSocket(client_socket);
+
         if (ShowConsoleMsg) {
             ShowConsoleMsg("New client connected\n");
         }
@@ -213,31 +226,33 @@ private:
         std::string line_buffer;
 
         while (m_running) {
-            int bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-            if (bytes_read <= 0) {
+            // Use non-blocking recv for immediate processing
+            int bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, MSG_DONTWAIT);
+            if (bytes_read > 0) {
+                buffer[bytes_read] = '\0';
+                line_buffer += buffer;
+
+                // Process complete lines IMMEDIATELY
+                size_t newline_pos;
+                while ((newline_pos = line_buffer.find('\n')) != std::string::npos) {
+                    std::string command = line_buffer.substr(0, newline_pos);
+                    line_buffer.erase(0, newline_pos + 1);
+
+                    processClientCommand(command);
+                }
+            } else if (bytes_read == 0) {
                 if (ShowConsoleMsg) {
                     ShowConsoleMsg("Client disconnected\n");
                 }
                 break;
-            }
-
-            buffer[bytes_read] = '\0';
-            line_buffer += buffer;
-
-            // Process complete lines
-            size_t newline_pos;
-            while ((newline_pos = line_buffer.find('\n')) != std::string::npos) {
-                std::string command = line_buffer.substr(0, newline_pos);
-                line_buffer.erase(0, newline_pos + 1);
-
-                processClientCommand(command);
-            }
-
+            } else if (bytes_read < 0) {
+// No data available, brief sleep
 #ifdef _WIN32
-            Sleep(10);
+                Sleep(1);
 #else
-            usleep(10000);
+                usleep(1000);
 #endif
+            }
         }
 
         {
@@ -265,6 +280,9 @@ private:
 
         int opt = 1;
         setsockopt(m_server_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
+
+        // Optimize server socket
+        optimizeSocket(m_server_socket);
 
         sockaddr_in server_addr{};
         server_addr.sin_family = AF_INET;
@@ -298,13 +316,14 @@ private:
                     std::lock_guard<std::mutex> lock(m_clients_mutex);
                     m_client_sockets.insert(client_socket);
                 }
-                handleClient(client_socket);
+                std::thread client_thread(&CSurf_IPC::handleClient, this, client_socket);
+                client_thread.detach(); // Handle each client in separate thread
             }
 
 #ifdef _WIN32
-            Sleep(100);
+            Sleep(10);
 #else
-            usleep(100000);
+            usleep(10000);
 #endif
         }
 

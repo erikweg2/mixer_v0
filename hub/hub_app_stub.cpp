@@ -1,5 +1,5 @@
 /*
- * HUB APPLICATION - FIXED PORTS
+ * HUB APPLICATION - FIXED PORTS - OPTIMIZED
  */
 
 // --- C/C++ Standard Libraries ---
@@ -13,6 +13,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <poll.h>
+#include <netinet/tcp.h>
 
 // --- Globals ---
 #define OSC_RECEIVE_PORT 9000    // Hub receives from GUI on this port
@@ -22,6 +23,15 @@
 int g_osc_receive_socket = -1;
 int g_osc_send_socket = -1;
 int g_ipc_sock = -1;
+
+void optimizeSocket(int socket) {
+    int no_delay = 1;
+    setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay));
+
+    int buf_size = 65536;
+    setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
+    setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+}
 
 // Manual OSC message construction
 std::vector<char> buildOscMessage(const std::string& address, float value) {
@@ -111,7 +121,7 @@ bool parseOscFromGui(const char* data, size_t size, int& track_index, float& vol
 
 // --- Main Application ---
 int main() {
-    std::cout << "Starting Hub Application (Fixed Ports)..." << std::endl;
+    std::cout << "Starting Hub Application (Fixed Ports - Optimized)..." << std::endl;
     std::cout << "Hub: Receiving from GUI on port " << OSC_RECEIVE_PORT << std::endl;
     std::cout << "Hub: Sending to GUI on port " << OSC_SEND_PORT << std::endl;
 
@@ -162,6 +172,9 @@ int main() {
                 throw std::runtime_error("Failed to create socket");
             }
 
+            // Optimize TCP socket for low latency
+            optimizeSocket(g_ipc_sock);
+
             sockaddr_in plugin_addr = {};
             plugin_addr.sin_family = AF_INET;
             plugin_addr.sin_port = htons(REAPER_PLUGIN_PORT);
@@ -185,7 +198,8 @@ int main() {
             std::string line_buffer;
 
             while (true) {
-                int poll_result = poll(fds, 2, 100); // 100ms timeout
+                // Reduced poll timeout from 100ms to 10ms for more responsive polling
+                int poll_result = poll(fds, 2, 10);
 
                 if (poll_result < 0) {
                     throw std::runtime_error("Poll error");
@@ -245,18 +259,22 @@ int main() {
                                               (sockaddr*)&gui_addr, &gui_addr_len);
 
                     if (bytes_read > 0) {
-                        read_buffer[bytes_read] = '\0';
-
                         int track_index;
                         float volume;
                         if (parseOscFromGui(read_buffer, bytes_read, track_index, volume)) {
                             std::cout << "Hub: Received COMMAND from GUI: Track " << track_index << " Volume " << volume << std::endl;
 
-                            // Forward to REAPER plugin as CONTROL command
+                            // IMMEDIATE forwarding to REAPER plugin - no buffering
                             char message[256];
-                            snprintf(message, sizeof(message), "SET_VOL %d %.3f\n", track_index, volume);
-                            send(g_ipc_sock, message, strlen(message), 0);
-                            std::cout << "Hub: Sent COMMAND to Plugin: " << message;
+                            snprintf(message, sizeof(message), "SET_VOL %d %.6f\n", track_index, volume);
+
+                            // Send immediately without waiting for poll cycle
+                            ssize_t sent = send(g_ipc_sock, message, strlen(message), MSG_DONTWAIT);
+                            if (sent > 0) {
+                                std::cout << "Hub: Sent COMMAND to Plugin: " << message;
+                            } else {
+                                std::cerr << "Hub: Failed to send command to plugin" << std::endl;
+                            }
                         }
                     }
                 }
