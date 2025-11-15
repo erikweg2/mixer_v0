@@ -1,5 +1,5 @@
 /*
- * QT GUI APPLICATION - BIDIRECTIONAL CONTROL
+ * QT GUI APPLICATION - FIXED PORTS
  */
 
 #include <QApplication>
@@ -14,10 +14,10 @@
 #include <QByteArray>
 #include <QDataStream>
 
-#define OSC_LISTEN_PORT 9000
-#define OSC_SEND_PORT 9000  // Send to Hub (same port)
+#define OSC_LISTEN_PORT 9002    // GUI listens on this port (Hub sends here)
+#define OSC_SEND_PORT 9000      // GUI sends on this port (Hub listens here)
 
-// --- OSC Listener & Sender Class ---
+// --- OSC Handler Class ---
 class OscHandler : public QObject {
     Q_OBJECT
 
@@ -26,7 +26,7 @@ public:
         // Setup receive socket
         m_receive_socket = new QUdpSocket(this);
         if (m_receive_socket->bind(QHostAddress::LocalHost, OSC_LISTEN_PORT)) {
-            qDebug() << "QtGUI: OSC Listener bound to" << OSC_LISTEN_PORT;
+            qDebug() << "QtGUI: OSC Listener bound to port" << OSC_LISTEN_PORT;
             connect(m_receive_socket, &QUdpSocket::readyRead, this, &OscHandler::onReadyRead);
         } else {
             qDebug() << "QtGUI: Failed to bind to port" << OSC_LISTEN_PORT;
@@ -34,6 +34,7 @@ public:
 
         // Setup send socket
         m_send_socket = new QUdpSocket(this);
+        qDebug() << "QtGUI: OSC Sender will send to port" << OSC_SEND_PORT;
     }
 
     void sendVolume(int trackIndex, float volume) {
@@ -69,7 +70,7 @@ public:
 
         // Send to Hub
         m_send_socket->writeDatagram(osc_message, QHostAddress::LocalHost, OSC_SEND_PORT);
-        qDebug() << "QtGUI: Sent OSC:" << address << volume;
+        qDebug() << "QtGUI: Sent OSC to port" << OSC_SEND_PORT << ":" << address << volume;
     }
 
 signals:
@@ -80,9 +81,12 @@ private slots:
         while (m_receive_socket->hasPendingDatagrams()) {
             QByteArray datagram;
             datagram.resize(m_receive_socket->pendingDatagramSize());
-            m_receive_socket->readDatagram(datagram.data(), datagram.size());
+            QHostAddress sender;
+            quint16 senderPort;
 
-            qDebug() << "QtGUI: Received UDP packet of size" << datagram.size();
+            m_receive_socket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
+
+            qDebug() << "QtGUI: Received UDP packet from port" << senderPort << "size:" << datagram.size();
             parseOscManually(datagram);
         }
     }
@@ -147,7 +151,7 @@ class MainWindow : public QMainWindow {
 
 public:
     MainWindow(QWidget* parent = nullptr) : QMainWindow(parent) {
-        setWindowTitle("Mixer GUI - Bidirectional Control");
+        setWindowTitle("Mixer GUI - Fixed Ports");
 
         // --- Setup GUI ---
         QWidget* central_widget = new QWidget(this);
@@ -156,7 +160,7 @@ public:
         m_track_label = new QLabel("Track 1 Volume: 50%", this);
         m_volume_slider = new QSlider(Qt::Horizontal, this);
         m_volume_slider->setRange(0, 100);
-        m_volume_slider->setValue(50); // Default position
+        m_volume_slider->setValue(50);
 
         layout->addWidget(m_track_label);
         layout->addWidget(m_volume_slider);
@@ -166,40 +170,29 @@ public:
         m_osc_handler = new OscHandler(this);
 
         // --- Connect signals ---
-        // OSC → GUI updates
         connect(m_osc_handler, &OscHandler::volumeChanged, this, &MainWindow::onVolumeChangedFromReaper);
-
-        // GUI → OSC sends
         connect(m_volume_slider, &QSlider::valueChanged, this, &MainWindow::onSliderMoved);
 
-        // Prevent feedback loop - only send when user interacts
         m_volume_slider->setTracking(true);
     }
 
 private slots:
     void onVolumeChangedFromReaper(int trackIndex, float volume) {
         if (trackIndex == 1) {
-            // Only update if the change is significant (prevents jitter)
-            float current_volume = m_volume_slider->value() / 100.0f;
-            if (fabs(current_volume - volume) > 0.001f) {
-                qDebug() << "QtGUI: REAPER updated track" << trackIndex << "to" << volume;
+            qDebug() << "QtGUI: REAPER updated track" << trackIndex << "to" << volume;
 
-                m_volume_slider->blockSignals(true);
-                int slider_value = static_cast<int>(volume * 100.0f);
-                m_volume_slider->setValue(slider_value);
-                m_track_label->setText(QString("Track 1 Volume: %1%").arg(slider_value));
-                m_volume_slider->blockSignals(false);
-            }
+            m_volume_slider->blockSignals(true);
+            int slider_value = static_cast<int>(volume * 100.0f);
+            m_volume_slider->setValue(slider_value);
+            m_track_label->setText(QString("Track 1 Volume: %1%").arg(slider_value));
+            m_volume_slider->blockSignals(false);
         }
     }
 
     void onSliderMoved(int value) {
-        // This is called when user moves the slider
         float volume = value / 100.0f;
         qDebug() << "QtGUI: User moved slider to" << value << "(" << volume << ")";
         m_track_label->setText(QString("Track 1 Volume: %1%").arg(value));
-
-        // Send volume command to REAPER
         m_osc_handler->sendVolume(1, volume);
     }
 
@@ -220,5 +213,4 @@ int main(int argc, char* argv[]) {
     return app.exec();
 }
 
-// --- FIX for AutoMoc Error ---
 #include "qt_gui_stub.moc"

@@ -1,5 +1,5 @@
 /*
- * HUB APPLICATION - WITH FEEDBACK PREVENTION
+ * HUB APPLICATION - FIXED PORTS
  */
 
 // --- C/C++ Standard Libraries ---
@@ -15,10 +15,12 @@
 #include <poll.h>
 
 // --- Globals ---
-#define OSC_BROADCAST_PORT 9000
+#define OSC_RECEIVE_PORT 9000    // Hub receives from GUI on this port
+#define OSC_SEND_PORT 9002       // Hub sends to GUI on this port
 #define REAPER_PLUGIN_PORT 9001
 
-int g_osc_socket = -1;
+int g_osc_receive_socket = -1;
+int g_osc_send_socket = -1;
 int g_ipc_sock = -1;
 
 // Manual OSC message construction
@@ -109,41 +111,49 @@ bool parseOscFromGui(const char* data, size_t size, int& track_index, float& vol
 
 // --- Main Application ---
 int main() {
-    std::cout << "Starting Hub Application (Feedback Prevention)..." << std::endl;
+    std::cout << "Starting Hub Application (Fixed Ports)..." << std::endl;
+    std::cout << "Hub: Receiving from GUI on port " << OSC_RECEIVE_PORT << std::endl;
+    std::cout << "Hub: Sending to GUI on port " << OSC_SEND_PORT << std::endl;
 
-    // --- 1. Initialize OSC Socket ---
-    g_osc_socket = socket(AF_INET, SOCK_DGRAM, 0);
-    if (g_osc_socket < 0) {
-        std::cerr << "Hub: Error creating OSC socket" << std::endl;
+    // --- 1. Initialize OSC Receive Socket (from GUI) ---
+    g_osc_receive_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_osc_receive_socket < 0) {
+        std::cerr << "Hub: Error creating OSC receive socket" << std::endl;
         return 1;
     }
 
-    // Enable broadcast and reuse
-    int broadcast = 1;
-    setsockopt(g_osc_socket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
     int reuse = 1;
-    setsockopt(g_osc_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    setsockopt(g_osc_receive_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     // Bind to receive from GUI
-    sockaddr_in osc_listen_addr = {};
-    osc_listen_addr.sin_family = AF_INET;
-    osc_listen_addr.sin_addr.s_addr = INADDR_ANY;
-    osc_listen_addr.sin_port = htons(OSC_BROADCAST_PORT);
+    sockaddr_in osc_receive_addr = {};
+    osc_receive_addr.sin_family = AF_INET;
+    osc_receive_addr.sin_addr.s_addr = INADDR_ANY;
+    osc_receive_addr.sin_port = htons(OSC_RECEIVE_PORT);
 
-    if (bind(g_osc_socket, (sockaddr*)&osc_listen_addr, sizeof(osc_listen_addr)) < 0) {
-        std::cerr << "Hub: Error binding OSC socket" << std::endl;
-        close(g_osc_socket);
+    if (bind(g_osc_receive_socket, (sockaddr*)&osc_receive_addr, sizeof(osc_receive_addr)) < 0) {
+        std::cerr << "Hub: Error binding OSC receive socket to port " << OSC_RECEIVE_PORT << std::endl;
+        close(g_osc_receive_socket);
         return 1;
     }
+
+    // --- 2. Initialize OSC Send Socket (to GUI) ---
+    g_osc_send_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (g_osc_send_socket < 0) {
+        std::cerr << "Hub: Error creating OSC send socket" << std::endl;
+        close(g_osc_receive_socket);
+        return 1;
+    }
+
+    int broadcast = 1;
+    setsockopt(g_osc_send_socket, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
 
     sockaddr_in osc_send_addr = {};
     osc_send_addr.sin_family = AF_INET;
-    osc_send_addr.sin_port = htons(OSC_BROADCAST_PORT);
+    osc_send_addr.sin_port = htons(OSC_SEND_PORT);
     inet_pton(AF_INET, "127.0.0.1", &osc_send_addr.sin_addr);
 
-    std::cout << "Hub: OSC server listening and broadcasting on 127.0.0.1:" << OSC_BROADCAST_PORT << std::endl;
-
-    // --- 2. Main processing loop ---
+    // --- 3. Main processing loop ---
     while (true) {
         try {
             // Connect to REAPER plugin
@@ -166,9 +176,9 @@ int main() {
 
             // Setup polling for multiple sockets
             struct pollfd fds[2];
-            fds[0].fd = g_ipc_sock;      // Plugin TCP connection
+            fds[0].fd = g_ipc_sock;           // Plugin TCP connection
             fds[0].events = POLLIN;
-            fds[1].fd = g_osc_socket;    // GUI OSC messages
+            fds[1].fd = g_osc_receive_socket; // GUI OSC messages
             fds[1].events = POLLIN;
 
             char read_buffer[1024];
@@ -218,12 +228,11 @@ int main() {
                                     std::cout << "Hub: Sending STATE to GUI: " << osc_address << " " << volume << std::endl;
 
                                     auto osc_message = buildOscMessage(osc_address, volume);
-                                    sendto(g_osc_socket, osc_message.data(), osc_message.size(), 0,
+                                    sendto(g_osc_send_socket, osc_message.data(), osc_message.size(), 0,
                                            (sockaddr*)&osc_send_addr, sizeof(osc_send_addr));
                                 }
                             }
                         }
-                        // Ignore other message types from plugin
                     }
                 }
 
@@ -231,7 +240,7 @@ int main() {
                 if (fds[1].revents & POLLIN) {
                     sockaddr_in gui_addr;
                     socklen_t gui_addr_len = sizeof(gui_addr);
-                    int bytes_read = recvfrom(g_osc_socket, read_buffer, sizeof(read_buffer) - 1, 0,
+                    int bytes_read = recvfrom(g_osc_receive_socket, read_buffer, sizeof(read_buffer) - 1, 0,
                                               (sockaddr*)&gui_addr, &gui_addr_len);
 
                     if (bytes_read > 0) {
@@ -258,6 +267,7 @@ int main() {
         }
     }
 
-    if (g_osc_socket >= 0) close(g_osc_socket);
+    if (g_osc_receive_socket >= 0) close(g_osc_receive_socket);
+    if (g_osc_send_socket >= 0) close(g_osc_send_socket);
     return 0;
 }
