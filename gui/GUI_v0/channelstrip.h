@@ -2,7 +2,7 @@
 #define CHANNELSTRIP_H
 
 #include <QWidget>
-#include "eqgraphwidget.h" // <-- 1. Include the graph widget
+#include "eqgraphwidget.h"
 
 // Forward declarations
 class QVBoxLayout;
@@ -13,13 +13,7 @@ class QLabel;
 class QDial;
 class QFrame;
 class QProgressBar;
-// class EqGraphWidget; // No longer needed, included above
 
-/*
- * ChannelStrip Widget
- * This custom widget represents a single vertical channel strip
- * in the mixer, based on your new layout.
- */
 class ChannelStrip : public QWidget
 {
     Q_OBJECT
@@ -29,27 +23,35 @@ public:
 
     int getChannelId() const;
 
+    // New method to set volume from REAPER
+    void setVolumeFromReaper(double volume);
+
 public slots:
     void setSelected(bool selected);
-    // --- 2. Add public slots to update the mini-graph ---
     void updateEqBand(int bandIndex, double freq, double gain, double q);
     void updateEqEnabled(int bandIndex, bool enabled);
 
 signals:
     void channelSelected(int channelId);
+    void volumeChanged(int channelId, double volume);  // New signal for volume changes
 
 private slots:
     void onSelectClicked();
+    void onFaderValueChanged(int value);
 
 private:
     int m_channelId;
     QPushButton *m_selectButton;
     QPushButton *m_soloButton;
     QPushButton *m_muteButton;
+    QSlider *m_fader;  // Store reference to fader
+    QProgressBar *m_meter;  // Store reference to meter
 
-    // --- 3. Add member variable for the graph ---
     EqGraphWidget *m_eqGraph;
+
+    // Volume conversion helpers
+    int volumeToFaderPosition(double volume);
+    double faderPositionToVolume(int position);
 };
 
 #endif // CHANNELSTRIP_H
-

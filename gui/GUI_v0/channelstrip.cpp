@@ -1,5 +1,5 @@
 #include "channelstrip.h"
-#include "eqgraphwidget.h" // Make sure this is included
+#include "eqgraphwidget.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -9,6 +9,8 @@
 #include <QDial>
 #include <QFrame>
 #include <QProgressBar>
+#include <QDebug>
+#include <cmath>
 
 /*
  * ChannelStrip Widget
@@ -16,9 +18,8 @@
  * in the mixer.
  */
 ChannelStrip::ChannelStrip(int channelId, QWidget *parent)
-    : QWidget(parent), m_channelId(channelId)
+    : QWidget(parent), m_channelId(channelId), m_fader(nullptr), m_meter(nullptr)
 {
-    // Use the class name as the object name for top-level CSS
     this->setObjectName("ChannelStrip");
 
     // --- Main Layout ---
@@ -33,7 +34,7 @@ ChannelStrip::ChannelStrip(int channelId, QWidget *parent)
     processingLayout->setSpacing(2);
     processingLayout->setContentsMargins(2, 2, 2, 2);
 
-    // 1. Comp Placeholder (MODIFIED - now includes "COMP" text)
+    // 1. Comp Placeholder
     QFrame *compPlaceholder = new QFrame();
     compPlaceholder->setObjectName("compPlaceholder");
     compPlaceholder->setMinimumHeight(30);
@@ -42,37 +43,29 @@ ChannelStrip::ChannelStrip(int channelId, QWidget *parent)
     QVBoxLayout *compLayout = new QVBoxLayout(compPlaceholder);
     compLayout->setContentsMargins(5, 5, 5, 5);
     QLabel *compLabel = new QLabel("COMP");
-    compLabel->setObjectName("compLabel"); // Added object name for styling
-    compLayout->addWidget(compLabel, 0, Qt::AlignLeft | Qt::AlignTop); // Align text to top-left
-    compLayout->addStretch(); // Push label to top
+    compLabel->setObjectName("compLabel");
+    compLayout->addWidget(compLabel, 0, Qt::AlignLeft | Qt::AlignTop);
+    compLayout->addStretch();
     processingLayout->addWidget(compPlaceholder);
 
-    // 2. EQ Graph Widget (FIXED)
-
-    // --- NEW: Create a container frame for the EQ section ---
+    // 2. EQ Graph Widget
     QFrame *eqContainer = new QFrame();
-    eqContainer->setObjectName("eqPlaceholder"); // Use same object name for styling
+    eqContainer->setObjectName("eqPlaceholder");
     eqContainer->setMinimumHeight(30);
 
-    // --- NEW: Create a layout for this container ---
     QVBoxLayout *eqLayout = new QVBoxLayout(eqContainer);
     eqLayout->setContentsMargins(5, 5, 5, 5);
-    eqLayout->setSpacing(2); // Add some spacing
+    eqLayout->setSpacing(2);
 
-    // --- NEW: Add the label to the container's layout ---
     QLabel *eqLabel = new QLabel("EQ");
     eqLabel->setObjectName("eqLabel");
     eqLayout->addWidget(eqLabel, 0, Qt::AlignLeft | Qt::AlignTop);
 
-    // --- NEW: Instantiate and add the graph widget to the layout ---
     m_eqGraph = new EqGraphWidget();
     m_eqGraph->setSimpleMode(true);
-    // Add the graph with a stretch factor so it fills remaining space
     eqLayout->addWidget(m_eqGraph, 1);
 
-    // --- NEW: Add the container (with its label and graph) to the main layout ---
     processingLayout->addWidget(eqContainer);
-
 
     // 3. Aux Sends
     QFrame *auxFrame = new QFrame();
@@ -80,7 +73,7 @@ ChannelStrip::ChannelStrip(int channelId, QWidget *parent)
     QVBoxLayout *auxLayout = new QVBoxLayout(auxFrame);
     auxLayout->setSpacing(1);
     auxLayout->setContentsMargins(0, 0, 0, 0);
-    for (int i = 0; i < 4; ++i) { // 4 aux sends as an example
+    for (int i = 0; i < 4; ++i) {
         QSlider *auxSlider = new QSlider(Qt::Horizontal);
         auxSlider->setObjectName("auxSlider");
         auxLayout->addWidget(auxSlider);
@@ -132,21 +125,22 @@ ChannelStrip::ChannelStrip(int channelId, QWidget *parent)
     faderLayout->setSpacing(5);
 
     // Main Fader
-    QSlider *fader = new QSlider(Qt::Vertical);
-    fader->setObjectName("mainFader");
-    fader->setRange(0, 100);
-    fader->setValue(75);
-    fader->setMinimumHeight(200);
-    faderLayout->addWidget(fader, 3); // Give fader more stretch
+    m_fader = new QSlider(Qt::Vertical);
+    m_fader->setObjectName("mainFader");
+    m_fader->setRange(0, 1000); // Higher resolution for smoother movement
+    m_fader->setValue(750); // Start at unity gain (0 dB)
+    m_fader->setMinimumHeight(200);
+    connect(m_fader, &QSlider::valueChanged, this, &ChannelStrip::onFaderValueChanged);
+    faderLayout->addWidget(m_fader, 3);
 
-    // Level Meter (using QProgressBar)
-    QProgressBar *meter = new QProgressBar();
-    meter->setOrientation(Qt::Vertical);
-    meter->setRange(0, 100);
-    meter->setValue(0); // Set to 0, would be updated by audio data
-    meter->setTextVisible(false);
-    meter->setObjectName("levelMeter");
-    faderLayout->addWidget(meter, 1); // Fader is 3x wider than meter
+    // Level Meter
+    m_meter = new QProgressBar();
+    m_meter->setOrientation(Qt::Vertical);
+    m_meter->setRange(0, 100);
+    m_meter->setValue(0);
+    m_meter->setTextVisible(false);
+    m_meter->setObjectName("levelMeter");
+    faderLayout->addWidget(m_meter, 1);
 
     mainLayout->addLayout(faderLayout);
 
@@ -164,6 +158,24 @@ int ChannelStrip::getChannelId() const
     return m_channelId;
 }
 
+void ChannelStrip::setVolumeFromReaper(double volume)
+{
+    // Block signals to prevent feedback loop
+    m_fader->blockSignals(true);
+
+    int faderPos = volumeToFaderPosition(volume);
+    m_fader->setValue(faderPos);
+
+    // Update meter based on volume (simplified)
+    int meterValue = static_cast<int>(volume * 25.0); // Scale to 0-100
+    m_meter->setValue(qMin(100, meterValue));
+
+    m_fader->blockSignals(false);
+
+    qDebug() << "ChannelStrip: Set volume from REAPER - Track:" << m_channelId
+             << "Volume:" << volume << "FaderPos:" << faderPos;
+}
+
 void ChannelStrip::setSelected(bool selected)
 {
     m_selectButton->blockSignals(true);
@@ -176,12 +188,40 @@ void ChannelStrip::onSelectClicked()
     emit channelSelected(m_channelId);
 }
 
-// --- ADDED MISSING FUNCTION IMPLEMENTATIONS ---
+void ChannelStrip::onFaderValueChanged(int value)
+{
+    double volume = faderPositionToVolume(value);
+    emit volumeChanged(m_channelId, volume);
+
+    // Update meter
+    int meterValue = static_cast<int>(volume * 25.0);
+    m_meter->setValue(qMin(100, meterValue));
+
+    qDebug() << "ChannelStrip: Fader moved - Track:" << m_channelId
+             << "Position:" << value << "Volume:" << volume;
+}
+
+int ChannelStrip::volumeToFaderPosition(double volume)
+{
+    // Convert linear volume (0.0-4.0) to fader position (0-1000)
+    // REAPER uses 0.0-4.0 range where 1.0 = 0 dB
+    if (volume <= 0.0) return 0;
+
+    // Simple linear mapping for now - can be improved with logarithmic scaling
+    double normalized = qBound(0.0, volume / 4.0, 1.0);
+    return static_cast<int>(normalized * 1000);
+}
+
+double ChannelStrip::faderPositionToVolume(int position)
+{
+    // Convert fader position (0-1000) to linear volume (0.0-4.0)
+    double normalized = static_cast<double>(position) / 1000.0;
+    return normalized * 4.0;
+}
 
 void ChannelStrip::updateEqBand(int bandIndex, double freq, double gain, double q)
 {
     if (m_eqGraph) {
-        // Pass the data to the mini-graph
         m_eqGraph->setBandParameters(bandIndex, freq, gain, q);
     }
 }
@@ -189,7 +229,6 @@ void ChannelStrip::updateEqBand(int bandIndex, double freq, double gain, double 
 void ChannelStrip::updateEqEnabled(int bandIndex, bool enabled)
 {
     if (m_eqGraph) {
-        // Pass the data to the mini-graph
         m_eqGraph->setBandEnabled(bandIndex, enabled);
     }
 }

@@ -3,13 +3,13 @@
 
 #include <QMainWindow>
 #include <QList>
-#include <QUdpSocket>
-#include <QTimer>
 
 // Forward declarations
 class QStackedWidget;
 class ChannelStrip;
 class EqWindow;
+class QUdpSocket;
+class QTimer;
 
 class MainWindow : public QMainWindow
 {

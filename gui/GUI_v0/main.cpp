@@ -26,7 +26,7 @@ const QString c_styleSheet = R"(
         background-color: #4A4A4A;
         border: 1px solid #2B2B2B;
         border-radius: 4px;
-        min-width: 120px; /* Give strips a bit more space */
+        min-width: 120px;
     }
 
     #processingFrame {
@@ -35,19 +35,15 @@ const QString c_styleSheet = R"(
         border-radius: 4px;
     }
 
-    /* --- NEW/MODIFIED PLACEHOLDER STYLES --- */
     #compPlaceholder {
         background-color: #2B2B2B;
         border: 1px solid #555;
-        /* margin-bottom: 2px; */ /* Optional: add space between them */
     }
 
     #eqPlaceholder {
         background-color: #2B2B2B;
         border: 1px solid #555;
     }
-    /* ----------------------------------------- */
-
 
     #auxFrame {
         background-color: transparent;
@@ -73,15 +69,15 @@ const QString c_styleSheet = R"(
 
     /* Specific Button Colors */
     #selectButton:checked {
-        background-color: #3C80D0; /* Blue */
+        background-color: #3C80D0;
         color: white;
     }
     #soloButton:checked {
-        background-color: #D8B030; /* Yellow */
+        background-color: #D8B030;
         color: #1A1A1A;
     }
     #muteButton:checked {
-        background-color: #D04040; /* Red */
+        background-color: #D04040;
         color: white;
     }
 
@@ -93,10 +89,10 @@ const QString c_styleSheet = R"(
         border-radius: 4px;
     }
     #mainFader::handle:vertical {
-        background: #C0C5C9; /* Light grey handle */
+        background: #C0C5C9;
         border: 1px solid #808080;
         height: 35px;
-        margin: 0 -10px; /* Make handle wider than groove */
+        margin: 0 -10px;
         border-radius: 4px;
     }
 
@@ -117,7 +113,7 @@ const QString c_styleSheet = R"(
     /* --- Pan Dial --- */
     QDial#panDial {
         background-color: #666;
-        border-radius: 20px; /* Half of 40px size */
+        border-radius: 20px;
     }
 
     /* --- Labels --- */
@@ -151,17 +147,17 @@ const QString c_styleSheet = R"(
         margin: 1px;
     }
 
-    /* --- EQ Window Styles (Dark theme) --- */
+    /* --- EQ Window Styles --- */
     QGroupBox#ModuleBox {
         font-size: 10pt;
         font-weight: bold;
         color: #909090;
         border: 1px solid #45494F;
         border-radius: 5px;
-        margin-top: 20px; /* Increased margin */
+        margin-top: 20px;
         background-color: #23262A;
         padding: 5px;
-        padding-top: 15px; /* Extra padding at top for title */
+        padding-top: 15px;
     }
     QGroupBox#ModuleBox::title {
         subcontrol-origin: padding;
@@ -208,7 +204,7 @@ const QString c_styleSheet = R"(
     }
 
     QPushButton#EqBandButton:checked {
-        background-color: #E6B04C; /* Tweaked color */
+        background-color: #E6B04C;
         border: 1px solid #F0C86C;
         color: #2D3035;
     }
