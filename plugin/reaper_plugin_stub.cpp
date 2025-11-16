@@ -10,6 +10,7 @@
 #include <mutex>
 #include <set>
 #include <map>
+#include <cmath>
 
 extern "C" {
 #include "reaper_plugin.h"
@@ -38,6 +39,19 @@ MediaTrack* (*GetTrack)(int index) = nullptr;
 MediaTrack* (*GetMasterTrack)(int proj) = nullptr;
 bool (*TrackList_AdjustWindows)(bool isMinor) = nullptr;
 
+// REAPER API functions for audio level monitoring
+double (*GetTrackUIVolPan)(MediaTrack* track, double* pan, double* volume) = nullptr;
+double (*Track_GetPeakInfo)(MediaTrack* track, int peakchannel) = nullptr;
+bool (*GetTrackAudioLevels)(MediaTrack* track, double* levels) = nullptr;
+
+// Workaround for min/max macros
+template<typename T>
+T clamp_value(T value, T min_val, T max_val) {
+    if (value < min_val) return min_val;
+    if (value > max_val) return max_val;
+    return value;
+}
+
 class CSurf_IPC : public IReaperControlSurface {
 private:
     std::atomic<bool> m_running{false};
@@ -50,6 +64,10 @@ private:
     std::atomic<bool> m_ignore_callbacks{false};
     std::map<MediaTrack*, int> m_track_map;
     int m_next_track_id{1};
+
+    // VU Meter monitoring
+    std::atomic<bool> m_vu_running{false};
+    std::thread m_vu_thread;
 
     int getTrackId(MediaTrack* track) {
         if (GetMasterTrack && track == GetMasterTrack(0)) {
@@ -130,6 +148,64 @@ private:
         }
     }
 
+    // Add this method to send VU meter data
+    void sendTrackVULevel(MediaTrack* track, float level_db, int client_socket = -1) {
+        if (!track) return;
+
+        int track_id = getTrackId(track);
+        char msg[256];
+        snprintf(msg, sizeof(msg), "VU %d %.2f\n", track_id, level_db);
+
+        if (client_socket >= 0) {
+            send(client_socket, msg, strlen(msg), 0);
+        } else {
+            sendToAllClients(msg);
+        }
+    }
+
+    // REAL implementation to get audio levels from REAPER
+    float getTrackAudioLevel(MediaTrack* track) {
+        if (!track) return -60.0f; // Silence
+
+        float peak_level_db = -60.0f;
+
+        // Method 1: Try GetTrackAudioLevels first (most accurate)
+        if (GetTrackAudioLevels) {
+            double levels[2] = {0.0, 0.0}; // Left and right channels
+            if (GetTrackAudioLevels(track, levels)) {
+                // Convert peak level to dB
+                double peak_linear = (levels[0] > levels[1]) ? levels[0] : levels[1];
+                if (peak_linear > 0.0) {
+                    peak_level_db = 20.0 * log10(peak_linear);
+                } else {
+                    peak_level_db = -60.0f;
+                }
+            }
+        }
+        // Method 2: Try Track_GetPeakInfo as fallback
+        else if (Track_GetPeakInfo) {
+            double peak_left = Track_GetPeakInfo(track, 0);  // Left channel
+            double peak_right = Track_GetPeakInfo(track, 1); // Right channel
+            double peak_linear = (peak_left > peak_right) ? peak_left : peak_right;
+
+            if (peak_linear > 0.0) {
+                peak_level_db = 20.0 * log10(peak_linear);
+            } else {
+                peak_level_db = -60.0f;
+            }
+        }
+        // Method 3: Fallback to volume-based estimation
+        else if (GetMediaTrackInfo_Value) {
+            double volume = GetMediaTrackInfo_Value(track, "D_VOL");
+            double volume_db = 20.0 * log10(volume);
+            // Conservative estimate: assume -20dB below volume setting
+            peak_level_db = volume_db - 20.0f;
+        }
+
+        // Clamp to reasonable range
+        return clamp_value(peak_level_db, -60.0f, 6.0f);
+    }
+
     void setTrackVolume(int track_id, float volume) {
         MediaTrack* track = getTrackById(track_id);
         if (!track || !SetMediaTrackInfo_Value) {
@@ -153,7 +229,7 @@ private:
         // Set the volume in REAPER with full precision - IMMEDIATE
         SetMediaTrackInfo_Value(track, "D_VOL", volume);
 
-        // Minimal delay for REAPER to process the change
+// Minimal delay for REAPER to process the change
 #ifdef _WIN32
         Sleep(1);  // Reduced from 10ms to 1ms
 #else
@@ -266,6 +342,34 @@ private:
 #endif
     }
 
+    void runVUMonitor() {
+        m_vu_running = true;
+        while (m_vu_running) {
+            // Update VU meters for all tracks
+            if (GetMasterTrack) {
+                MediaTrack* master_track = GetMasterTrack(0);
+                float level = getTrackAudioLevel(master_track);
+                sendTrackVULevel(master_track, level);
+            }
+
+            if (GetNumTracks && GetTrack) {
+                int num_tracks = GetNumTracks();
+                for (int i = 0; i < num_tracks; i++) {
+                    MediaTrack* track = GetTrack(i);
+                    float level = getTrackAudioLevel(track);
+                    sendTrackVULevel(track, level);
+                }
+            }
+
+            // Update at 15 FPS for smooth VU meters
+#ifdef _WIN32
+            Sleep(67);
+#else
+            usleep(67000);
+#endif
+        }
+    }
+
     void runServer() {
 #ifdef _WIN32
         WSADATA wsaData;
@@ -351,12 +455,17 @@ public:
     CSurf_IPC() {
         m_running = true;
         m_server_thread = std::thread(&CSurf_IPC::runServer, this);
+        m_vu_thread = std::thread(&CSurf_IPC::runVUMonitor, this);
     }
 
     ~CSurf_IPC() {
         m_running = false;
+        m_vu_running = false;
         if (m_server_thread.joinable()) {
             m_server_thread.join();
+        }
+        if (m_vu_thread.joinable()) {
+            m_vu_thread.join();
         }
     }
 
@@ -425,12 +534,28 @@ REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(REAPER_PLUGIN_HINSTANCE hI
         GetTrack = (MediaTrack* (*)(int))rec->GetFunc("GetTrack");
         GetMasterTrack = (MediaTrack* (*)(int))rec->GetFunc("GetMasterTrack");
         TrackList_AdjustWindows = (bool (*)(bool))rec->GetFunc("TrackList_AdjustWindows");
+
+        // Try to get audio level monitoring functions
+        GetTrackAudioLevels = (bool (*)(MediaTrack*, double*))rec->GetFunc("GetTrackAudioLevels");
+        Track_GetPeakInfo = (double (*)(MediaTrack*, int))rec->GetFunc("Track_GetPeakInfo");
+        GetTrackUIVolPan = (double (*)(MediaTrack*, double*, double*))rec->GetFunc("GetTrackUIVolPan");
     }
 
     if (!ShowConsoleMsg) return 0;
 
     rec->Register("csurf", &csurf_reg);
     ShowConsoleMsg("=== IPC Control Surface - 12-Bit Resolution Support Loaded ===\n");
+    ShowConsoleMsg("=== REAL VU Meter Support Added ===\n");
+
+    // Log which audio level methods are available
+    if (GetTrackAudioLevels) {
+        ShowConsoleMsg("Using GetTrackAudioLevels for VU meters\n");
+    } else if (Track_GetPeakInfo) {
+        ShowConsoleMsg("Using Track_GetPeakInfo for VU meters\n");
+    } else {
+        ShowConsoleMsg("Using volume-based estimation for VU meters\n");
+    }
+
     return 1;
 }
 }

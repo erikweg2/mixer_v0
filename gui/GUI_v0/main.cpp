@@ -140,9 +140,10 @@ const QString c_styleSheet = R"(
     }
     #levelMeter::chunk {
         background-color: qlineargradient(x1:0, y1:1, x2:0, y2:0,
-                                          stop:0 #00AEEF,
-                                          stop:0.8 #7FFF00,
-                                          stop:1 #FF0000);
+                                          stop:0 #00AEEF,    /* Blue for low levels */
+                                          stop:0.6 #7FFF00,  /* Green for medium levels */
+                                          stop:0.8 #FFFF00,  /* Yellow for high levels */
+                                          stop:1 #FF0000);   /* Red for clipping */
         border-radius: 2px;
         margin: 1px;
     }

@@ -132,6 +132,7 @@ void MainWindow::parseOscMessage(const QByteArray &data)
 
     qDebug() << "GUI: Received OSC message:" << address;
 
+    // Parse volume messages
     if (address.startsWith("/track/") && address.contains("/volume")) {
         QStringList parts = address.split('/');
         if (parts.size() >= 3) {
@@ -172,6 +173,60 @@ void MainWindow::parseOscMessage(const QByteArray &data)
                         }
                     }
                 }
+            }
+        }
+    }
+    // Parse VU meter messages
+    else if (address.startsWith("/track/") && address.contains("/vumeter")) {
+        QStringList parts = address.split('/');
+        if (parts.size() >= 3) {
+            bool ok;
+            int track_index = parts[2].toInt(&ok);
+            if (ok && track_index >= 1 && track_index <= m_channelStrips.size()) {
+                int address_len = address.length() + 1;
+                int padded_addr_len = (address_len + 3) & ~3;
+
+                if (padded_addr_len + 4 <= data.size()) {
+                    const char* type_tag = ptr + padded_addr_len;
+                    if (type_tag[0] == ',' && type_tag[1] == 'f' && type_tag[2] == '\0') {
+                        int type_tag_len = 4;
+                        int data_offset = padded_addr_len + type_tag_len;
+
+                        if (data_offset + 4 <= data.size()) {
+                            const unsigned char* float_data =
+                                reinterpret_cast<const unsigned char*>(ptr + data_offset);
+
+                            union {
+                                uint32_t i;
+                                float f;
+                            } converter;
+
+                            converter.i = (float_data[0] << 24) |
+                                          (float_data[1] << 16) |
+                                          (float_data[2] << 8) |
+                                          float_data[3];
+
+                            float levelDb = converter.f;
+                            parseVULevelMessage(address, levelDb);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void MainWindow::parseVULevelMessage(const QString& address, float levelDb)
+{
+    QStringList parts = address.split('/');
+    if (parts.size() >= 3) {
+        bool ok;
+        int track_index = parts[2].toInt(&ok);
+        if (ok && track_index >= 1 && track_index <= m_channelStrips.size()) {
+            ChannelStrip* strip = m_channelStrips[track_index - 1];
+            if (strip) {
+                strip->setVULevel(levelDb);
+                qDebug() << "GUI: Updated VU meter - Track:" << track_index << "Level:" << levelDb << "dB";
             }
         }
     }

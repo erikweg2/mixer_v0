@@ -119,6 +119,20 @@ bool parseOscFromGui(const char* data, size_t size, int& track_index, float& vol
     return false;
 }
 
+// Add this parsing function for VU meter messages from REAPER
+bool parseVUFromPlugin(const std::string& message, int& track_index, float& level_db) {
+    // Parse "VU TRACK LEVEL_DB" messages
+    if (message.find("VU ") == 0) {
+        char command[4];
+        if (sscanf(message.c_str(), "%3s %d %f", command, &track_index, &level_db) == 3) {
+            if (strcmp(command, "VU") == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // --- Main Application ---
 int main() {
     std::cout << "Starting Hub Application (Fixed Ports - Optimized)..." << std::endl;
@@ -227,7 +241,7 @@ int main() {
                         std::string message = line_buffer.substr(0, newline_pos);
                         line_buffer.erase(0, newline_pos + 1);
 
-                        // Only process VOL messages (state updates from REAPER)
+                        // Process VOL messages (state updates from REAPER)
                         if (message.find("VOL ") == 0) {
                             std::cout << "Hub: Received STATE from Plugin: " << message << std::endl;
 
@@ -246,6 +260,21 @@ int main() {
                                     sendto(g_osc_send_socket, osc_message.data(), osc_message.size(), 0,
                                            (sockaddr*)&osc_send_addr, sizeof(osc_send_addr));
                                 }
+                            }
+                        }
+                        // Process VU meter messages from REAPER plugin
+                        else if (message.find("VU ") == 0) {
+                            std::cout << "Hub: Received VU from Plugin: " << message << std::endl;
+
+                            int track_index;
+                            float level_db;
+                            if (parseVUFromPlugin(message, track_index, level_db)) {
+                                std::string osc_address = "/track/" + std::to_string(track_index) + "/vumeter";
+                                std::cout << "Hub: Sending VU to GUI: " << osc_address << " " << level_db << "dB" << std::endl;
+
+                                auto osc_message = buildOscMessage(osc_address, level_db);
+                                sendto(g_osc_send_socket, osc_message.data(), osc_message.size(), 0,
+                                       (sockaddr*)&osc_send_addr, sizeof(osc_send_addr));
                             }
                         }
                     }

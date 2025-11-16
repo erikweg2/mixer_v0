@@ -60,6 +60,9 @@ private:
     void initializeOscCommunication();
     void parseOscMessage(const QByteArray &data);
     QByteArray buildOscMessage(const QString &address, float value);
+
+    // VU Meter parsing
+    void parseVULevelMessage(const QString& address, float levelDb);
 };
 
 #endif // MAINWINDOW_H

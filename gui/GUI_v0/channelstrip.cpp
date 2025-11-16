@@ -10,6 +10,7 @@
 #include <QFrame>
 #include <QProgressBar>
 #include <QDebug>
+#include <QTimer>
 #include <cmath>
 
 /*
@@ -18,9 +19,15 @@
  * in the mixer.
  */
 ChannelStrip::ChannelStrip(int channelId, QWidget *parent)
-    : QWidget(parent), m_channelId(channelId), m_fader(nullptr), m_meter(nullptr)
+    : QWidget(parent), m_channelId(channelId), m_fader(nullptr), m_meter(nullptr), m_smoothedLevel(-60.0f)
 {
     this->setObjectName("ChannelStrip");
+
+    // --- VU Meter update timer ---
+    m_vuUpdateTimer = new QTimer(this);
+    m_vuUpdateTimer->setInterval(50); // 20 FPS for VU meters
+    connect(m_vuUpdateTimer, &QTimer::timeout, this, &ChannelStrip::onVUUpdateTimeout);
+    m_vuUpdateTimer->start();
 
     // --- Main Layout ---
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
@@ -133,13 +140,14 @@ ChannelStrip::ChannelStrip(int channelId, QWidget *parent)
     connect(m_fader, &QSlider::valueChanged, this, &ChannelStrip::onFaderValueChanged);
     faderLayout->addWidget(m_fader, 3);
 
-    // Level Meter
+    // Level Meter - Updated for VU
     m_meter = new QProgressBar();
     m_meter->setOrientation(Qt::Vertical);
-    m_meter->setRange(0, 100);
-    m_meter->setValue(0);
+    m_meter->setRange(-60, 6); // dB range: -60dB to +6dB
+    m_meter->setValue(-60); // Start at silence
     m_meter->setTextVisible(false);
     m_meter->setObjectName("levelMeter");
+    m_meter->setInvertedAppearance(true); // 0dB at top, -60dB at bottom
     faderLayout->addWidget(m_meter, 1);
 
     mainLayout->addLayout(faderLayout);
@@ -151,6 +159,14 @@ ChannelStrip::ChannelStrip(int channelId, QWidget *parent)
     mainLayout->addWidget(bottomLabel);
 
     setLayout(mainLayout);
+}
+
+ChannelStrip::~ChannelStrip()
+{
+    if (m_vuUpdateTimer) {
+        m_vuUpdateTimer->stop();
+        delete m_vuUpdateTimer;
+    }
 }
 
 int ChannelStrip::getChannelId() const
@@ -166,14 +182,22 @@ void ChannelStrip::setVolumeFromReaper(double volume)
     int faderPos = volumeToFaderPosition(volume);
     m_fader->setValue(faderPos);
 
-    // Update meter based on volume (simplified)
-    int meterValue = static_cast<int>(volume * 25.0); // Scale to 0-100
-    m_meter->setValue(qMin(100, meterValue));
-
     m_fader->blockSignals(false);
 
     qDebug() << "ChannelStrip: Set volume from REAPER - Track:" << m_channelId
              << "Volume:" << volume << "FaderPos:" << faderPos;
+}
+
+void ChannelStrip::setVULevel(float levelDb)
+{
+    // Smooth the VU meter reading to avoid flickering
+    float alpha = 0.3f; // Smoothing factor
+    m_smoothedLevel = alpha * levelDb + (1.0f - alpha) * m_smoothedLevel;
+
+    // Clamp to meter range
+    m_smoothedLevel = qBound(-60.0f, m_smoothedLevel, 6.0f);
+
+    qDebug() << "ChannelStrip: VU Level - Track:" << m_channelId << "Level:" << levelDb << "dB, Smoothed:" << m_smoothedLevel;
 }
 
 void ChannelStrip::setSelected(bool selected)
@@ -193,12 +217,14 @@ void ChannelStrip::onFaderValueChanged(int value)
     double volume = faderPositionToVolume(value);
     emit volumeChanged(m_channelId, volume);
 
-    // Update meter
-    int meterValue = static_cast<int>(volume * 25.0);
-    m_meter->setValue(qMin(100, meterValue));
-
     qDebug() << "ChannelStrip: Fader moved - Track:" << m_channelId
              << "Position:" << value << "Volume:" << volume;
+}
+
+void ChannelStrip::onVUUpdateTimeout()
+{
+    // Update the VU meter display with smoothed value
+    m_meter->setValue(static_cast<int>(m_smoothedLevel));
 }
 
 int ChannelStrip::volumeToFaderPosition(double volume)

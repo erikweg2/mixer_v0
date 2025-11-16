@@ -13,6 +13,7 @@ class QLabel;
 class QDial;
 class QFrame;
 class QProgressBar;
+class QTimer;
 
 class ChannelStrip : public QWidget
 {
@@ -20,11 +21,15 @@ class ChannelStrip : public QWidget
 
 public:
     explicit ChannelStrip(int channelId, QWidget *parent = nullptr);
+    ~ChannelStrip();
 
     int getChannelId() const;
 
     // New method to set volume from REAPER
     void setVolumeFromReaper(double volume);
+
+    // New method to set VU meter level from REAPER
+    void setVULevel(float levelDb);
 
 public slots:
     void setSelected(bool selected);
@@ -38,6 +43,7 @@ signals:
 private slots:
     void onSelectClicked();
     void onFaderValueChanged(int value);
+    void onVUUpdateTimeout();
 
 private:
     int m_channelId;
@@ -52,6 +58,10 @@ private:
     // Volume conversion helpers
     int volumeToFaderPosition(double volume);
     double faderPositionToVolume(int position);
+
+    // VU meter smoothing
+    float m_smoothedLevel;
+    QTimer *m_vuUpdateTimer;
 };
 
 #endif // CHANNELSTRIP_H
